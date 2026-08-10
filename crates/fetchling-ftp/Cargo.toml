@@ -1,0 +1,16 @@
+[package]
+name = "fetchling-ftp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "fetchling-ftp for fetchling"
+
+[dependencies]
+fetchling-core = { workspace = true }
+fetchling-net = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+url = { workspace = true }

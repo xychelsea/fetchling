@@ -1,0 +1,13 @@
+[package]
+name = "fetchling-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared types and parsers for fetchling"
+
+[dependencies]
+thiserror = { workspace = true }
+url = { workspace = true }
+encoding_rs = { workspace = true }

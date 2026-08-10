@@ -1,0 +1,11 @@
+[package]
+name = "fetchling-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Command-line option parsing for fetchling"
+
+[dependencies]
+fetchling-core = { workspace = true }

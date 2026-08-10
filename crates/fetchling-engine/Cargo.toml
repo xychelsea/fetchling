@@ -1,0 +1,29 @@
+[package]
+name = "fetchling-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "fetchling-engine for fetchling"
+
+[dependencies]
+fetchling-core = { workspace = true }
+fetchling-http = { workspace = true }
+fetchling-ftp = { workspace = true }
+fetchling-formats = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }
+posix-regex = "0.1.4"
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+hex = { workspace = true }
+percent-encoding = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+xattr = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

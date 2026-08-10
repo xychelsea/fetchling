@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    name: build and publish Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p fetchling
+
+      - name: Package artifact
+        run: |
+          staging="fetchling-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "$staging"
+          cp target/release/fetchling "$staging/"
+          cp README.md CHANGELOG.md LICENSE LICENSE-MIT "$staging/"
+          tar -czf "${staging}.tar.gz" "$staging"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          body_path: CHANGELOG.md
+          files: |
+            fetchling-*-x86_64-unknown-linux-gnu.tar.gz
+            fetchling-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

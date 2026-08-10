@@ -1,0 +1,27 @@
+[package]
+name = "fetchling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "fetchling is a modular, non-interactive, async network retriever written in Rust, for fetching and mirroring remote content from the command line."
+keywords = ["wget", "download", "http", "ftp", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+default-run = "fetchling"
+
+[[bin]]
+name = "fetchling"
+path = "src/main.rs"
+
+[dependencies]
+fetchling-core = { workspace = true }
+fetchling-cli = { workspace = true }
+fetchling-engine = { workspace = true }
+tokio = { workspace = true }
+rustls = { workspace = true }
+nix = { version = "0.29", default-features = false, features = ["process", "fs"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
