@@ -80,7 +80,7 @@ cargo install --path crates/fetchling
 cargo install --git https://github.com/xychelsea/fetchling fetchling
 ```
 
-`fetchling` is not published to crates.io yet.
+`fetchling` is published to [crates.io](https://crates.io/crates/fetchling).
 ### NixOS
 
 A development build can also be produced with a temporary Nix shell (my environment):
