@@ -77,6 +77,7 @@ pub struct Config {
     pub preferred_location: Option<String>,
     /// Maximum concurrent downloads (`--max-threads`). Default 1 = serial.
     pub max_threads: u32,
+    pub max_threads_per_host: u32,
 
     pub directories: bool,
     pub force_directories: bool,
@@ -120,7 +121,6 @@ pub struct Config {
 
     pub secure_protocol: String,
     pub https_only: bool,
-    pub ciphers: Option<String>,
     pub check_certificate: bool,
     pub certificate: Option<String>,
     pub certificate_type: String,
@@ -264,6 +264,7 @@ impl Default for Config {
             metalink_index: 0,
             preferred_location: None,
             max_threads: 1,
+            max_threads_per_host: 0,
 
             directories: true,
             force_directories: false,
@@ -307,7 +308,6 @@ impl Default for Config {
 
             secure_protocol: "auto".into(),
             https_only: false,
-            ciphers: None,
             check_certificate: true,
             certificate: None,
             certificate_type: "pem".into(),
@@ -380,7 +380,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Apply mirror shorthand (-m): recursive, level=inf, timestamping, keep listing.
     pub fn apply_mirror(&mut self) {
         self.recursive = true;
         self.level = -1; // infinite
@@ -388,11 +387,24 @@ impl Config {
         self.remove_listing = false;
     }
 
-    /// Apply `-T` setting all three network timeouts.
     pub fn apply_timeout(&mut self, seconds: f64) {
         self.timeout = Some(seconds);
         self.dns_timeout = Some(seconds);
         self.connect_timeout = Some(seconds);
         self.read_timeout = Some(seconds);
+    }
+
+    pub fn effective_max_threads_per_host(&self) -> u32 {
+        if self.max_threads_per_host == 0 {
+            self.max_threads.clamp(1, 4)
+        } else {
+            self.max_threads_per_host
+        }
+    }
+
+    pub fn finalize_concurrency(&mut self) {
+        if self.max_threads_per_host == 0 {
+            self.max_threads_per_host = self.effective_max_threads_per_host();
+        }
     }
 }

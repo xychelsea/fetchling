@@ -202,9 +202,9 @@ dependencies = [
 
 [[package]]
 name = "cookie_store"
-version = "0.21.1"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eac901828f88a5241ee0600950ab981148a18f2f756900ffba1b125ca6a3ef9"
+checksum = "15b2c103cf610ec6cae3da84a766285b42fd16aad564758459e6ecf128c75206"
 dependencies = [
  "cookie",
  "document-features",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-cli",
  "fetchling-core",
@@ -408,14 +408,14 @@ dependencies = [
 
 [[package]]
 name = "fetchling-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
 ]
 
 [[package]]
 name = "fetchling-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "thiserror",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
  "fetchling-formats",
@@ -432,6 +432,7 @@ dependencies = [
  "fetchling-http",
  "hex",
  "md-5",
+ "nix",
  "percent-encoding",
  "posix-regex",
  "regex",
@@ -444,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-formats"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "fetchling-core",
@@ -458,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-ftp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
  "fetchling-net",
@@ -470,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
@@ -491,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "fetchling-core",
@@ -2065,9 +2066,9 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "x509-parser"
-version = "0.17.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4569f339c0c402346d4a75a9e39cf8dad310e287eef1ff56d4c68e5067f53460"
+checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs",
  "data-encoding",

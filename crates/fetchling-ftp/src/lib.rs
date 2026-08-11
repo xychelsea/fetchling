@@ -214,7 +214,7 @@ impl FtpClient {
 
         send_cmd(&mut session.control, &format!("RETR {path}")).await?;
 
-        let mut data = accept_data_conn(cfg, data_channel, &session).await?;
+        let mut data = accept_data_conn(cfg, data_channel, &session, control_ip).await?;
         let retr = read_reply(&mut session.control, session.read_to).await?;
         if !(retr.starts_with('1') || retr.starts_with('2')) {
             return Err(Error::Server(format!("RETR failed: {retr}")));
@@ -307,7 +307,7 @@ impl FtpClient {
             send_cmd(&mut session.control, &format!("NLST {list_path}")).await?;
             let reply = read_reply(&mut session.control, session.read_to).await?;
             let mut data = if reply.starts_with('1') || reply.starts_with('2') {
-                accept_data_conn(cfg, data_channel, &session).await?
+                accept_data_conn(cfg, data_channel, &session, control_ip).await?
             } else {
                 drop(data_channel);
                 let data_channel =
@@ -318,7 +318,7 @@ impl FtpClient {
                 if !(list_reply.starts_with('1') || list_reply.starts_with('2')) {
                     return Err(Error::Server(format!("NLST/LIST failed for glob: {reply}")));
                 }
-                accept_data_conn(cfg, data_channel, &session).await?
+                accept_data_conn(cfg, data_channel, &session, control_ip).await?
             };
             let mut buf = Vec::new();
             data.read_to_end(&mut buf).await?;
@@ -540,7 +540,7 @@ async fn list_directory(
         let mlsd_reply = read_reply(&mut session.control, session.read_to).await?;
         if mlsd_reply.starts_with('1') || mlsd_reply.starts_with('2') {
             used_mlsd = true;
-            accept_data_conn(cfg, data_channel, session).await?
+            accept_data_conn(cfg, data_channel, session, control_ip).await?
         } else {
             drop(data_channel);
             let data_channel =
@@ -548,7 +548,7 @@ async fn list_directory(
             send_cmd(&mut session.control, &format!("LIST {list_path}")).await?;
             let list_reply = read_reply(&mut session.control, session.read_to).await?;
             if list_reply.starts_with('1') || list_reply.starts_with('2') {
-                accept_data_conn(cfg, data_channel, session).await?
+                accept_data_conn(cfg, data_channel, session, control_ip).await?
             } else {
                 drop(data_channel);
                 let data_channel =
@@ -562,7 +562,7 @@ async fn list_directory(
                     )));
                 }
                 used_nlst_only = true;
-                accept_data_conn(cfg, data_channel, session).await?
+                accept_data_conn(cfg, data_channel, session, control_ip).await?
             }
         }
     };
@@ -746,15 +746,20 @@ async fn open_data_channel(
     }
 }
 
-async fn accept_data(cfg: &Config, data_channel: DataChannel) -> Result<TcpStream> {
+async fn accept_data(
+    cfg: &Config,
+    data_channel: DataChannel,
+    control_ip: IpAddr,
+) -> Result<TcpStream> {
     match data_channel {
         DataChannel::Passive(addr) => connect_tcp(cfg, addr).await,
         DataChannel::Active(listener) => {
-            let accept = timeout(Duration::from_secs(60), listener.accept())
+            let (tcp, peer) = timeout(Duration::from_secs(60), listener.accept())
                 .await
                 .map_err(|_| Error::Network("active FTP data accept timeout".into()))?
                 .map_err(|e| Error::Network(format!("active FTP accept: {e}")))?;
-            Ok(accept.0)
+            validate_pasv_addr(peer, control_ip)?;
+            Ok(tcp)
         }
     }
 }
@@ -763,8 +768,9 @@ async fn accept_data_conn(
     cfg: &Config,
     data_channel: DataChannel,
     session: &FtpSession,
+    control_ip: IpAddr,
 ) -> Result<FtpConn> {
-    let tcp = accept_data(cfg, data_channel).await?;
+    let tcp = accept_data(cfg, data_channel, control_ip).await?;
     if session.data_tls {
         let ftps = session
             .ftps
@@ -829,7 +835,9 @@ async fn query_unix_mode_from_list(
     if !(list_reply.starts_with('1') || list_reply.starts_with('2')) {
         return None;
     }
-    let mut data = accept_data_conn(cfg, data_channel, session).await.ok()?;
+    let mut data = accept_data_conn(cfg, data_channel, session, control_ip)
+        .await
+        .ok()?;
     let mut raw = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -957,7 +965,7 @@ fn apply_unix_mode(path: &Path, mode: u32) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(mode & 0o7777);
+        let perms = std::fs::Permissions::from_mode(mode & 0o777);
         let _ = std::fs::set_permissions(path, perms);
     }
     #[cfg(not(unix))]

@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-08-11
+
+Experimental follow-up release: security hardening, download concurrency/performance, and local benchmarking helpers.
+
+### Added
+
+- `--max-threads-per-host` to cap concurrent connections per host (default `min(max-threads, 4)`)
+- `SECURITY.md` with supported versions and vulnerability reporting guidance
+- `scripts/wget-benchmark.sh` and README benchmark results for local wget comparisons
+
+### Changed
+
+- Default per-host concurrency raised from a hard cap of 2 to `min(max-threads, 4)`
+- Buffered HTTP body writes with `block_in_place` around flushes for better async throughput
+- TCP_NODELAY on connections; idle connection-pool sizing tied to configured concurrency
+
+### Security
+
+- `robots.txt` fails closed when fetch or parse fails
+- FTP symlink targets hardened to basename-only local names
+- Warning when `.netrc` permissions are too open
+- Clearer warnings for password-bearing URLs and `--no-check-certificate`
+
+### Fixed
+
+- Askpass, progress meter, and daemon path edge cases
+- `cookie_store` dependency bump
+
+### Not in this release
+
+- crates.io publish (install from GitHub Releases or source)
+- Cross-platform release binaries (Linux x86_64 only for the GitHub Release artifact)
+- Full wget feature parity (see Feature status in the README)
+
 ## [0.1.0] - 2026-08-10
 
 First public **experimental** release. `fetchling` is not a drop-in replacement for `wget`.
@@ -25,4 +59,5 @@ First public **experimental** release. `fetchling` is not a drop-in replacement 
 - Full wget feature parity (Digest/NTLM auth, SOCKS/FTP proxies, EPSV, HTTP/2, Metalink segmentation, and other Feature status gaps)
 - Cross-platform release binaries (Linux x86_64 only for the GitHub Release artifact)
 
+[0.1.1]: https://github.com/xychelsea/fetchling/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xychelsea/fetchling/releases/tag/v0.1.0

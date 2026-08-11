@@ -9,9 +9,7 @@ use crate::options::OPTIONS;
 #[derive(Debug)]
 pub enum ParseOutcome {
     Help,
-    /// Long `--version` output (name, description, license).
     Version,
-    /// Short `-V` output (name and version only).
     VersionShort,
     Run(Box<Config>),
 }
@@ -171,6 +169,7 @@ where
         apply_wgetrc_command(&mut cfg, &cmd)?;
     }
 
+    cfg.finalize_concurrency();
     Ok(ParseOutcome::Run(Box::new(cfg)))
 }
 
@@ -338,6 +337,15 @@ fn apply_long(cfg: &mut Config, name: &str, value: Option<&str>) -> Result<()> {
             }
             cfg.max_threads = n;
         }
+        "max-threads-per-host" => {
+            let n: u32 = need(value, name)?
+                .parse()
+                .map_err(|_| Error::Parse("bad max-threads-per-host".into()))?;
+            if !(1..=32).contains(&n) {
+                return Err(Error::Parse("max-threads-per-host must be 1..=32".into()));
+            }
+            cfg.max_threads_per_host = n;
+        }
         "no-cache" => cfg.cache = false,
         "cache" => cfg.cache = true,
         "no-cookies" => cfg.cookies = false,
@@ -383,7 +391,6 @@ fn apply_long(cfg: &mut Config, name: &str, value: Option<&str>) -> Result<()> {
         "netrc-file" => cfg.netrc_file = Some(need(value, name)?),
         "secure-protocol" => cfg.secure_protocol = need(value, name)?,
         "https-only" => cfg.https_only = true,
-        "ciphers" => cfg.ciphers = Some(need(value, name)?),
         "no-check-certificate" => cfg.check_certificate = false,
         "check-certificate" => cfg.check_certificate = true,
         "certificate" => cfg.certificate = Some(need(value, name)?),

@@ -198,7 +198,7 @@ fn build_server_verifier(
     let builder = if crls.is_empty() {
         builder
     } else {
-        builder.with_crls(crls).allow_unknown_revocation_status()
+        builder.with_crls(crls)
     };
     builder
         .build()

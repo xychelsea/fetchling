@@ -651,6 +651,13 @@ pub static OPTIONS: &[OptMeta] = &[
         help: "max concurrent downloads (1..=32, default 1)",
     },
     OptMeta {
+        long: "max-threads-per-host",
+        short: None,
+        takes_value: true,
+        section: Section::Download,
+        help: "max concurrent downloads per host (1..=32, default min(max-threads, 4))",
+    },
+    OptMeta {
         long: "no-cache",
         short: None,
         takes_value: false,
@@ -852,13 +859,6 @@ pub static OPTIONS: &[OptMeta] = &[
         takes_value: false,
         section: Section::Https,
         help: "only follow secure HTTPS links",
-    },
-    OptMeta {
-        long: "ciphers",
-        short: None,
-        takes_value: true,
-        section: Section::Https,
-        help: "accepted for compatibility; ignored (rustls has no OpenSSL/GnuTLS cipher language)",
     },
     OptMeta {
         long: "no-check-certificate",

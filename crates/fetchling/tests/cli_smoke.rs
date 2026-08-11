@@ -35,7 +35,10 @@ fn max_threads_parses() {
     use fetchling_cli::{parse_args, ParseOutcome};
     let out = parse_args(["fetchling", "--max-threads=2", "http://x"]).unwrap();
     match out {
-        ParseOutcome::Run(c) => assert_eq!(c.max_threads, 2),
+        ParseOutcome::Run(c) => {
+            assert_eq!(c.max_threads, 2);
+            assert_eq!(c.max_threads_per_host, 2);
+        }
         _ => panic!("expected run"),
     }
 }
@@ -54,7 +57,48 @@ fn max_threads_allows_32() {
     use fetchling_cli::{parse_args, ParseOutcome};
     let out = parse_args(["fetchling", "--max-threads=32", "http://x"]).unwrap();
     match out {
-        ParseOutcome::Run(c) => assert_eq!(c.max_threads, 32),
+        ParseOutcome::Run(c) => {
+            assert_eq!(c.max_threads, 32);
+            assert_eq!(c.max_threads_per_host, 4);
+        }
+        _ => panic!("expected run"),
+    }
+}
+
+#[test]
+fn max_threads_per_host_parses() {
+    use fetchling_cli::{parse_args, ParseOutcome};
+    let out = parse_args([
+        "fetchling",
+        "--max-threads=8",
+        "--max-threads-per-host=8",
+        "http://x",
+    ])
+    .unwrap();
+    match out {
+        ParseOutcome::Run(c) => {
+            assert_eq!(c.max_threads, 8);
+            assert_eq!(c.max_threads_per_host, 8);
+        }
+        _ => panic!("expected run"),
+    }
+}
+
+#[test]
+fn max_threads_per_host_rejects_above_32() {
+    use fetchling_cli::parse_args;
+    use fetchling_core::Error;
+    let err = parse_args(["fetchling", "--max-threads-per-host=33", "http://x"]).unwrap_err();
+    assert!(matches!(err, Error::Parse(_)));
+    assert!(err.to_string().contains("1..=32"));
+}
+
+#[test]
+fn max_threads_per_host_default_caps_at_4() {
+    use fetchling_cli::{parse_args, ParseOutcome};
+    let out = parse_args(["fetchling", "--max-threads=8", "http://x"]).unwrap();
+    match out {
+        ParseOutcome::Run(c) => assert_eq!(c.max_threads_per_host, 4),
         _ => panic!("expected run"),
     }
 }
