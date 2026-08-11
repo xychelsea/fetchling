@@ -743,13 +743,13 @@ Compare localhost wall time and throughput against `wget` with:
 
 The harness serves temporary fixtures on `127.0.0.1`, times quiet downloads for a small file, a large file, and a multi-URL batch (`fetchling --max-threads 8` vs sequential `wget`), and checks downloaded bytes with `cmp`. Optional knobs (`LARGE_MIB`, `MULTI_PARTS`, `SMALL_RUNS`, and others) are documented at the top of the script.
 
-Sample results on Linux x86_64 against GNU Wget 1.25.0 (localhost HTTP only; not WAN-representative). This run used a `debug` `fetchling` binary; prefer a `release` build for timing (`cargo build --release -p fetchling`).
+Sample results on Linux x86_64 against GNU Wget 1.25.0 (localhost HTTP only; not WAN-representative), using a `release` `fetchling` binary (`cargo build --release -p fetchling`).
 
 | Scenario | fetchling | wget | ratio (fl/wg) |
 | --- | ---: | ---: | ---: |
-| Small (1 KiB, mean of 20) | 6.40 ms | 4.77 ms | 1.34 |
-| Large (256 MiB, mean of 3) | 0.389 s (658 MiB/s) | 0.427 s (600 MiB/s) | 0.91 |
-| Multi (16×4 MiB, mean of 3) | 0.062 s (1036 MiB/s, `--max-threads 8`) | 0.159 s (403 MiB/s, sequential) | 0.39 |
+| Small (1 KiB, mean of 20) | 4.33 ms | 4.37 ms | 0.99 |
+| Large (256 MiB, mean of 3) | 0.355 s (721 MiB/s) | 0.414 s (618 MiB/s) | 0.86 |
+| Multi (16×4 MiB, mean of 3) | 0.053 s (1208 MiB/s, `--max-threads 8`) | 0.158 s (405 MiB/s, sequential) | 0.34 |
 
 Integrity checks passed for every scenario. The multi-URL case is not an apples-to-apples concurrency comparison: `wget` was timed as a sequential loop because it has no native job pool comparable to `--max-threads`.
 
