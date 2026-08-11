@@ -26,6 +26,19 @@ pub fn default_netrc_path() -> Option<PathBuf> {
 }
 
 pub fn load_netrc(path: &Path) -> Result<Netrc> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.mode() & 0o777;
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "fetchling: warning: netrc {} is group- or world-readable (mode {mode:04o}); credentials may be exposed",
+                    path.display()
+                );
+            }
+        }
+    }
     let text = std::fs::read_to_string(path).map_err(|e| {
         Error::Io(std::io::Error::new(
             e.kind(),

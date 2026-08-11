@@ -120,7 +120,6 @@ pub struct Config {
 
     pub secure_protocol: String,
     pub https_only: bool,
-    pub ciphers: Option<String>,
     pub check_certificate: bool,
     pub certificate: Option<String>,
     pub certificate_type: String,
@@ -307,7 +306,6 @@ impl Default for Config {
 
             secure_protocol: "auto".into(),
             https_only: false,
-            ciphers: None,
             check_certificate: true,
             certificate: None,
             certificate_type: "pem".into(),

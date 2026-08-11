@@ -10,6 +10,7 @@ pub static DEFERRED: &[&str] = &[
     "bind-interface",
     "check-hostname",
     "chunk-size",
+    "ciphers",
     "cookie-suffixes",
     "dane",
     "default-http-port",

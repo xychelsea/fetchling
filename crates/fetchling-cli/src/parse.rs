@@ -383,7 +383,6 @@ fn apply_long(cfg: &mut Config, name: &str, value: Option<&str>) -> Result<()> {
         "netrc-file" => cfg.netrc_file = Some(need(value, name)?),
         "secure-protocol" => cfg.secure_protocol = need(value, name)?,
         "https-only" => cfg.https_only = true,
-        "ciphers" => cfg.ciphers = Some(need(value, name)?),
         "no-check-certificate" => cfg.check_certificate = false,
         "check-certificate" => cfg.check_certificate = true,
         "certificate" => cfg.certificate = Some(need(value, name)?),

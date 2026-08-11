@@ -854,13 +854,6 @@ pub static OPTIONS: &[OptMeta] = &[
         help: "only follow secure HTTPS links",
     },
     OptMeta {
-        long: "ciphers",
-        short: None,
-        takes_value: true,
-        section: Section::Https,
-        help: "accepted for compatibility; ignored (rustls has no OpenSSL/GnuTLS cipher language)",
-    },
-    OptMeta {
         long: "no-check-certificate",
         short: None,
         takes_value: false,

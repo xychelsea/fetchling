@@ -98,12 +98,12 @@ pub fn narrative_enabled(verbose: bool, is_tty: bool) -> bool {
 }
 
 pub fn format_fetch_start(url: &str) -> String {
-    url.to_string()
+    redact_url_for_log(url)
 }
 
 /// Single redirect hop: `  -> {url}`.
 pub fn format_redirect_hop(url: &str) -> String {
-    format!("  -> {url}")
+    format!("  -> {}", redact_url_for_log(url))
 }
 
 /// Collapsed redirect follow-up; `None` when there were no hops.
@@ -111,8 +111,23 @@ pub fn format_redirects(hops: &[String]) -> Option<String> {
     match hops.len() {
         0 => None,
         1 => Some(format_redirect_hop(&hops[0])),
-        n => Some(format!("  -> {n} redirects, final {}", hops[n - 1])),
+        n => Some(format!(
+            "  -> {n} redirects, final {}",
+            redact_url_for_log(&hops[n - 1])
+        )),
     }
+}
+
+/// Strip URL userinfo so passwords never appear in narrative logs.
+pub fn redact_url_for_log(url: &str) -> String {
+    let Ok(mut u) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if !u.username().is_empty() || u.password().is_some() {
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+    }
+    u.as_str().to_string()
 }
 
 /// DNS resolution line: `  dns host  ip, ip, …` (addresses without ports).
@@ -577,6 +592,19 @@ mod tests {
             format_fetch_start("https://example.com/a"),
             "https://example.com/a"
         );
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo() {
+        assert_eq!(
+            redact_url_for_log("https://user:secret@example.com/a"),
+            "https://example.com/a"
+        );
+        assert_eq!(
+            format_fetch_start("https://user:secret@example.com/a"),
+            "https://example.com/a"
+        );
+        assert_eq!(format_redirect_hop("ftp://u:p@host/x"), "  -> ftp://host/x");
     }
 
     #[test]

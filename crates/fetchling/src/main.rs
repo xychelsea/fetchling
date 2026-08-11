@@ -58,7 +58,9 @@ fn prepare_background(cfg: &mut Config) -> Result<()> {
             cfg.logfile = Some("fetchling-log".into());
         }
         let log_path = cfg.logfile.clone().expect("logfile set");
-        daemonize(&log_path)?;
+        let abs = absolutize_path(&log_path);
+        cfg.logfile = Some(abs.clone());
+        daemonize(&abs)?;
         cfg.background = false;
         Ok(())
     }
@@ -67,6 +69,17 @@ fn prepare_background(cfg: &mut Config) -> Result<()> {
         eprintln!("fetchling: warning: background/daemonize is not supported on this platform; continuing in the foreground");
         cfg.background = false;
         Ok(())
+    }
+}
+
+fn absolutize_path(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return path.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).display().to_string(),
+        Err(_) => path.to_string(),
     }
 }
 

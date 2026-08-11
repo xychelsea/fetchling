@@ -843,6 +843,7 @@ fn load_body(cfg: &Config) -> Result<Vec<u8>> {
 struct AuthOrigin {
     host: Option<String>,
     scheme: String,
+    port: Option<u16>,
     user: Option<String>,
     pass: Option<String>,
 }
@@ -886,13 +887,16 @@ impl AuthOrigin {
         Self {
             host: url.host_str().map(|s| s.to_string()),
             scheme: url.scheme().to_string(),
+            port: url.port_or_known_default(),
             user,
             pass,
         }
     }
 
     fn matches(&self, url: &Url) -> bool {
-        url.scheme() == self.scheme && url.host_str() == self.host.as_deref()
+        url.scheme() == self.scheme
+            && url.host_str() == self.host.as_deref()
+            && url.port_or_known_default() == self.port
     }
 }
 

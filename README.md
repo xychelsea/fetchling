@@ -606,7 +606,7 @@ fetchling also provides separate retry, retry-delay, inter-request wait, and ran
 | Background / daemon (`-b`) | Partial | Unix daemonize; non-Unix warns and stays foreground |
 | FTP proxies | Not implemented | `ftp_proxy` / `FTP_PROXY` warned and ignored; FTP client never proxies |
 | wgetrc `robots=` | Not implemented | Warned no-op; robots always enforced when recursing |
-| Custom TLS ciphers | Not implemented | `--ciphers` accepted, warned, not applied (rustls) |
+| Custom TLS ciphers | Deferred | `--ciphers` rejected until rustls cipher configuration exists |
 | `--random-file` / `--egd-file` | Not implemented | Accepted, ignored with warning |
 | HTTP/2 | Deferred | Hyper HTTP/1 only; `--http2`, `--http2-only`, `--http2-request-window` |
 | Chunked / parallel download | Deferred | `--chunk-size` |

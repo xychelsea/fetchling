@@ -383,9 +383,9 @@ async fn ensure_robots(state: &Shared, url: &Url) -> Robots {
             Ok(body) => Robots::parse(&body),
             Err(e) => {
                 state.log.debug(&format!(
-                    "robots.txt fetch failed for {cache_key}: {e}; allowing all"
+                    "robots.txt fetch failed for {cache_key}: {e}; denying all"
                 ));
-                Robots::default()
+                Robots::deny_all()
             }
         };
 
@@ -1139,25 +1139,54 @@ fn accept_url(cfg: &Config, url: &Url) -> bool {
 }
 
 fn regex_is_match(cfg: &Config, pattern: &str, hay: &str) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static PCRE_CACHE: RefCell<HashMap<String, Regex>> = RefCell::new(HashMap::new());
+        static POSIX_CACHE: RefCell<HashMap<(String, bool), posix_regex::PosixRegex<'static>>> =
+            RefCell::new(HashMap::new());
+    }
+
     if cfg.regex_type.eq_ignore_ascii_case("pcre") {
-        return Regex::new(pattern)
-            .map(|r| r.is_match(hay))
-            .unwrap_or(false);
+        return PCRE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let re = match cache.get(pattern) {
+                Some(re) => re,
+                None => {
+                    let Ok(compiled) = Regex::new(pattern) else {
+                        return false;
+                    };
+                    cache.insert(pattern.to_string(), compiled);
+                    cache.get(pattern).expect("just inserted")
+                }
+            };
+            re.is_match(hay)
+        });
     }
-    match posix_regex::PosixRegexBuilder::new(pattern.as_bytes())
-        .with_default_classes()
-        .extended(true)
-        .compile()
-    {
-        Ok(re) => {
-            let mut re = re;
-            if cfg.ignore_case {
-                re = re.case_insensitive(true);
-            }
-            !re.matches(hay.as_bytes(), Some(1)).is_empty()
+
+    let key = (pattern.to_string(), cfg.ignore_case);
+    POSIX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(&key) {
+            let compiled = match posix_regex::PosixRegexBuilder::new(pattern.as_bytes())
+                .with_default_classes()
+                .extended(true)
+                .compile()
+            {
+                Ok(mut re) => {
+                    if cfg.ignore_case {
+                        re = re.case_insensitive(true);
+                    }
+                    re
+                }
+                Err(_) => return false,
+            };
+            cache.insert(key.clone(), compiled);
         }
-        Err(_) => false,
-    }
+        let re = cache.get(&key).expect("just ensured");
+        !re.matches(hay.as_bytes(), Some(1)).is_empty()
+    })
 }
 
 fn maybe_set_xattrs(
@@ -1270,6 +1299,20 @@ fn safe_local_symlink_target(target: &str) -> Option<&str> {
     Some(target)
 }
 
+fn safe_local_symlink_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('\0') {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    if name == "." || name == ".." {
+        return None;
+    }
+    Some(name)
+}
+
 async fn enqueue_ftp_listing_entries(
     state: &Shared,
     base: &Url,
@@ -1315,6 +1358,12 @@ async fn enqueue_ftp_listing_entries(
                     }
                     q.push_back((child, depth + 1));
                 } else {
+                    let Some(link_name) = safe_local_symlink_name(&entry.name) else {
+                        state
+                            .log
+                            .info(&format!("rejected (unsafe symlink name): {}", entry.name));
+                        continue;
+                    };
                     let Some(target) = target.as_deref().and_then(safe_local_symlink_target) else {
                         state.log.info(&format!(
                             "rejected (unsafe symlink target): {} -> {:?}",
@@ -1322,7 +1371,7 @@ async fn enqueue_ftp_listing_entries(
                         ));
                         continue;
                     };
-                    let dest = preferred_dir.with_file_name(&entry.name);
+                    let dest = preferred_dir.join(link_name);
                     if let Some(parent) = dest.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -1480,8 +1529,19 @@ fn verify_metalink_hashes(path: &Path, expected: &str, keep_badhash: bool) -> Re
 
 fn warn_unimplemented_stubs(cfg: &Config) {
     let mut notes = Vec::new();
-    if cfg.ciphers.is_some() {
-        notes.push("--ciphers is accepted but not applied yet");
+    if !cfg.check_certificate {
+        notes.push(
+            "--no-check-certificate disables TLS certificate and hostname verification; connections are not authenticated",
+        );
+    }
+    if cfg.password.is_some()
+        || cfg.http_password.is_some()
+        || cfg.ftp_password.is_some()
+        || cfg.proxy_password.is_some()
+    {
+        notes.push(
+            "password options may be visible in the process list; prefer --ask-password, --use-askpass, or netrc",
+        );
     }
     if cfg.random_file.is_some() || cfg.egd_file.is_some() {
         notes.push("--random-file/--egd-file are ignored (modern CSPRNGs do not need seeding)");
@@ -1627,6 +1687,17 @@ mod tests {
         assert!(safe_local_symlink_target("../escape").is_none());
         assert!(safe_local_symlink_target("/abs").is_none());
         assert!(safe_local_symlink_target("").is_none());
+    }
+
+    #[test]
+    fn safe_symlink_name_rejects_traversal() {
+        assert_eq!(safe_local_symlink_name("link.bin"), Some("link.bin"));
+        assert!(safe_local_symlink_name("../../etc/passwd").is_none());
+        assert!(safe_local_symlink_name("..").is_none());
+        assert!(safe_local_symlink_name(".").is_none());
+        assert!(safe_local_symlink_name("/abs").is_none());
+        assert!(safe_local_symlink_name("a/b").is_none());
+        assert!(safe_local_symlink_name("").is_none());
     }
 
     #[tokio::test]

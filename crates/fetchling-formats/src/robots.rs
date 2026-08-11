@@ -10,6 +10,12 @@ pub struct Robots {
 }
 
 impl Robots {
+    pub fn deny_all() -> Self {
+        let mut robots = Self::default();
+        robots.rules.insert("*".into(), vec!["/".into()]);
+        robots
+    }
+
     pub fn parse(body: &str) -> Self {
         let mut robots = Self::default();
         let mut current_agents: Vec<String> = Vec::new();
@@ -68,6 +74,13 @@ impl Robots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_all_blocks_everything() {
+        let r = Robots::deny_all();
+        let u = Url::parse("http://ex/anything").unwrap();
+        assert!(!r.allows("fetchling", &u));
+    }
 
     #[test]
     fn disallow_root() {

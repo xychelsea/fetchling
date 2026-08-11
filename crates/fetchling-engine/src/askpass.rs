@@ -62,7 +62,10 @@ fn read_password_tty(prompt: &str) -> Result<String> {
         let _ = err.flush();
     }
 
-    let line = if let Some(t) = tty {
+    #[cfg(unix)]
+    let echo_guard = tty.as_ref().and_then(EchoOffGuard::new);
+
+    let line = if let Some(ref t) = tty {
         let mut reader = std::io::BufReader::new(t);
         let mut s = String::new();
         reader
@@ -76,7 +79,50 @@ fn read_password_tty(prompt: &str) -> Result<String> {
             .map_err(|e| Error::Auth(format!("read password: {e}")))?;
         s
     };
+
+    #[cfg(unix)]
+    drop(echo_guard);
+
+    #[cfg(unix)]
+    {
+        let _ = writeln!(std::io::stderr());
+    }
+
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(unix)]
+struct EchoOffGuard {
+    fd: std::os::fd::RawFd,
+    original: nix::sys::termios::Termios,
+}
+
+#[cfg(unix)]
+impl EchoOffGuard {
+    fn new(tty: &std::fs::File) -> Option<Self> {
+        use nix::sys::termios::{self, LocalFlags, SetArg};
+        use std::os::fd::AsRawFd;
+
+        let original = termios::tcgetattr(tty).ok()?;
+        let mut noecho = original.clone();
+        noecho.local_flags.remove(LocalFlags::ECHO);
+        termios::tcsetattr(tty, SetArg::TCSANOW, &noecho).ok()?;
+        Some(Self {
+            fd: tty.as_raw_fd(),
+            original,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EchoOffGuard {
+    fn drop(&mut self) {
+        use nix::sys::termios::{self, SetArg};
+        use std::os::fd::BorrowedFd;
+
+        let fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
+        let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &self.original);
+    }
 }
 
 #[cfg(test)]
@@ -100,8 +146,7 @@ mod tests {
     #[test]
     fn askpass_printf_fills_password() {
         let dir = std::env::temp_dir().join(format!("fetchling-askpass-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::create_dir_all(&dir);
         let askpass = make_askpass_echo(&dir);
         let mut cfg = Config {
             use_askpass: Some(askpass.display().to_string()),
