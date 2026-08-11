@@ -80,7 +80,8 @@ cargo install --path crates/fetchling
 cargo install --git https://github.com/xychelsea/fetchling fetchling
 ```
 
-`fetchling` is published to [crates.io](https://crates.io/crates/fetchling).
+crates.io publishing is not available yet; use GitHub Releases or install from source as above.
+
 ### NixOS
 
 A development build can also be produced with a temporary Nix shell (my environment):
@@ -793,14 +794,14 @@ For compatibility changes, include tests for the specific retrieval behavior rat
 
 ## Project status
 
-`fetchling` **0.1.0** is an experimental public release. The advertised [Features](#features) surface is covered by localhost behavior tests and a short CI `wget` comparison; remaining gaps are tracked under [Feature status](#feature-status).
+`fetchling` **0.1.1** is an experimental public release. The advertised [Features](#features) surface is covered by localhost behavior tests and a short CI `wget` comparison; remaining gaps are tracked under [Feature status](#feature-status).
 
 Release gate for this version:
 
 - behavior matrix + `scripts/wget-compare.sh` green in CI
 - accepted-but-inert options warn or reject clearly (`robots=` wgetrc, `ftp_proxy`, deferred flags)
 
-Post-`0.1.0` priorities remain reliability and selective parity work (not full wget2 coverage):
+Post-`0.1.1` priorities remain reliability and selective parity work (not full wget2 coverage):
 
 - proxy transport (SOCKS / FTP proxy)
 - HTTP auth challenges (Digest / NTLM)

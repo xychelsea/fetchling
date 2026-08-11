@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-cli",
  "fetchling-core",
@@ -408,14 +408,14 @@ dependencies = [
 
 [[package]]
 name = "fetchling-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
 ]
 
 [[package]]
 name = "fetchling-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "thiserror",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
  "fetchling-formats",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-formats"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "fetchling-core",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-ftp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fetchling-core",
  "fetchling-net",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "fetchling-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "fetchling-core",
