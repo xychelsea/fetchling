@@ -23,7 +23,7 @@ Fetchling currently includes:
 - custom request headers, methods, and request bodies
 - output to files or standard output
 - configurable retry, timeout, rate, and quota controls
-- concurrent retrieval with global and per-host limits
+- concurrent retrieval with global and per-host limits (`--max-threads`, `--max-threads-per-host`)
 - ipv4 and ipv6 connection handling
 - custom DNS servers and DNS bind address
 - recursive html and css link discovery
@@ -141,7 +141,11 @@ fetchling --max-threads 8 \
   https://example.org/c.bin
 ```
 
-`--max-threads` accepts values from 1 through 32 and defaults to 1. `fetchling` also applies a separate per-host concurrency limit so that the global job limit does not translate directly into the same number of simultaneous transfers to one host.
+`--max-threads` accepts values from 1 through 32 and defaults to 1. A separate `--max-threads-per-host` limit caps simultaneous transfers to one host (1..=32). When unset, it defaults to `min(max-threads, 4)` so a global job pool does not open the same number of connections to a single host unless you raise the per-host cap explicitly:
+
+```console
+fetchling --max-threads 8 --max-threads-per-host 8 -i urls.txt
+```
 
 ## Recursive retrieval
 
@@ -635,7 +639,7 @@ Fetchling is organized as a `cargo` workspace with eight crates:
 | `fetchling-formats` | HTML/CSS extraction, `robots.txt`, Metalink, WARC, and link conversion |
 | `fetchling-engine` | Retrieval scheduling, recursive traversal, concurrency, and orchestration |
 
-The engine owns the retrieval queue and shared crawl state. Independent jobs are run through Tokio tasks subject to a global semaphore controlled by `--max-threads`. A separate per-host semaphore limits simultaneous retrievals from a single host. The engine also keeps shared state for:
+The engine owns the retrieval queue and shared crawl state. Independent jobs are run through Tokio tasks subject to a global semaphore controlled by `--max-threads`. A separate per-host semaphore (`--max-threads-per-host`, default `min(max-threads, 4)`) limits simultaneous retrievals from a single host. The engine also keeps shared state for:
 
 - visited URL deduplication
 - recursive work queues
@@ -738,18 +742,25 @@ cargo test --workspace
 Compare localhost wall time and throughput against `wget` with:
 
 ```console
-./scripts/wget-bench.sh
+./scripts/wget-benchmark.sh
 ```
 
-The harness serves temporary fixtures on `127.0.0.1`, times quiet downloads for a small file, a large file, and a multi-URL batch (`fetchling --max-threads 8` vs sequential `wget`), and checks downloaded bytes with `cmp`. Optional knobs (`LARGE_MIB`, `MULTI_PARTS`, `SMALL_RUNS`, and others) are documented at the top of the script.
+Or, in NixOS (my environment):
+
+```console
+nix-shell -p cargo rustc wget python3 -I nixpkgs=channel:nixos-unstable \
+  --run 'cargo build --release -p fetchling && ./scripts/wget-benchmark.sh'
+```
+
+The harness serves temporary fixtures on `127.0.0.1`, times quiet downloads for a small file, a large file, and a multi-URL batch (`fetchling --max-threads 8 --max-threads-per-host 4` vs sequential `wget`), and checks downloaded bytes with `cmp`. Optional knobs (`LARGE_MIB`, `MULTI_PARTS`, `SMALL_RUNS`, `PER_HOST_THREADS`, and others) are documented at the top of the script.
 
 Sample results on Linux x86_64 against GNU Wget 1.25.0 (localhost HTTP only; not WAN-representative), using a `release` `fetchling` binary (`cargo build --release -p fetchling`).
 
 | Scenario | fetchling | wget | ratio (fl/wg) |
 | --- | ---: | ---: | ---: |
 | Small (1 KiB, mean of 20) | 4.33 ms | 4.37 ms | 0.99 |
-| Large (256 MiB, mean of 3) | 0.355 s (721 MiB/s) | 0.414 s (618 MiB/s) | 0.86 |
-| Multi (16×4 MiB, mean of 3) | 0.053 s (1208 MiB/s, `--max-threads 8`) | 0.158 s (405 MiB/s, sequential) | 0.34 |
+| Large (256 MiB, mean of 3) | 0.410 s (624 MiB/s) | 0.470 s (544 MiB/s) | 0.87 |
+| Multi (16×4 MiB, mean of 3) | 0.057 s (1123 MiB/s, `--max-threads 8 --max-threads-per-host 4`) | 0.201 s (318 MiB/s, sequential) | 0.28 |
 
 Integrity checks passed for every scenario. The multi-URL case is not an apples-to-apples concurrency comparison: `wget` was timed as a sequential loop because it has no native job pool comparable to `--max-threads`.
 

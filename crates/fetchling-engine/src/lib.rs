@@ -31,9 +31,6 @@ pub use fs::{
     should_skip_clobber, unique_path, DestAction,
 };
 
-/// Cap concurrent downloads to a single host (independent of `--max-threads`).
-const MAX_PER_HOST: usize = 2;
-
 pub struct Engine {
     cfg: Config,
     log: Logger,
@@ -327,10 +324,11 @@ impl Engine {
 }
 
 async fn host_semaphore(state: &Shared, host: &str) -> Arc<Semaphore> {
+    let per_host = state.cfg.effective_max_threads_per_host().max(1) as usize;
     let mut map = state.host_semaphores.lock().await;
     Arc::clone(
         map.entry(host.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(MAX_PER_HOST))),
+            .or_insert_with(|| Arc::new(Semaphore::new(per_host))),
     )
 }
 

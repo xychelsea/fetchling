@@ -651,6 +651,13 @@ pub static OPTIONS: &[OptMeta] = &[
         help: "max concurrent downloads (1..=32, default 1)",
     },
     OptMeta {
+        long: "max-threads-per-host",
+        short: None,
+        takes_value: true,
+        section: Section::Download,
+        help: "max concurrent downloads per host (1..=32, default min(max-threads, 4))",
+    },
+    OptMeta {
         long: "no-cache",
         short: None,
         takes_value: false,

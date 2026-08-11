@@ -1,7 +1,7 @@
 //! HTTP/1.1 retrieval with TLS connector reuse and keep-alive pooling.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Mutex;
@@ -38,8 +38,9 @@ mod cookies;
 
 pub use cookies::Jar;
 
-const MAX_IDLE_PER_KEY: usize = 2;
-const MAX_IDLE_TOTAL: usize = 32;
+const MAX_IDLE_PER_KEY_DEFAULT: usize = 2;
+const MAX_IDLE_TOTAL_DEFAULT: usize = 32;
+const WRITE_BUF_CAP: usize = 256 * 1024;
 const WARC_TEE_CAP: usize = 64 * 1024 * 1024;
 
 type PooledSender = SendRequest<Full<Bytes>>;
@@ -54,13 +55,34 @@ struct PoolKey {
     proxy: String,
 }
 
-#[derive(Default)]
 struct IdlePool {
     map: HashMap<PoolKey, VecDeque<(PooledSender, Option<IpAddr>)>>,
     total: usize,
+    max_idle_per_key: usize,
+    max_idle_total: usize,
+}
+
+impl Default for IdlePool {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            total: 0,
+            max_idle_per_key: MAX_IDLE_PER_KEY_DEFAULT,
+            max_idle_total: MAX_IDLE_TOTAL_DEFAULT,
+        }
+    }
 }
 
 impl IdlePool {
+    fn with_limits(max_idle_per_key: usize, max_idle_total: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            total: 0,
+            max_idle_per_key: max_idle_per_key.max(1),
+            max_idle_total: max_idle_total.max(1),
+        }
+    }
+
     fn take(&mut self, key: &PoolKey) -> Option<(PooledSender, Option<IpAddr>)> {
         let q = self.map.get_mut(key)?;
         let s = q.pop_front()?;
@@ -72,11 +94,11 @@ impl IdlePool {
     }
 
     fn put(&mut self, key: PoolKey, sender: PooledSender, peer_ip: Option<IpAddr>) {
-        if self.total >= MAX_IDLE_TOTAL {
+        if self.total >= self.max_idle_total {
             return;
         }
         let q = self.map.entry(key).or_default();
-        if q.len() >= MAX_IDLE_PER_KEY {
+        if q.len() >= self.max_idle_per_key {
             return;
         }
         q.push_back((sender, peer_ip));
@@ -120,11 +142,15 @@ impl HttpClient {
             HstsStore::default()
         };
         let tls = build_connector(cfg)?;
+        let max_per_host = cfg.effective_max_threads_per_host().max(1) as usize;
+        let max_threads = cfg.max_threads.max(1) as usize;
+        let max_idle_per_key = MAX_IDLE_PER_KEY_DEFAULT.max(max_per_host);
+        let max_idle_total = MAX_IDLE_TOTAL_DEFAULT.max(max_threads.saturating_mul(2));
         Ok(Self {
             dns: DnsCache::new(),
             tls,
             jar: Mutex::new(jar),
-            pool: Mutex::new(IdlePool::default()),
+            pool: Mutex::new(IdlePool::with_limits(max_idle_per_key, max_idle_total)),
             hsts: Mutex::new(hsts),
             log,
         })
@@ -1025,6 +1051,28 @@ async fn next_frame(
     }
 }
 
+fn write_all_blocking(writer: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
+    let multi = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multi {
+        tokio::task::block_in_place(|| writer.write_all(data))
+    } else {
+        writer.write_all(data)
+    }
+}
+
+fn flush_blocking(writer: &mut impl Write) -> std::io::Result<()> {
+    let multi = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multi {
+        tokio::task::block_in_place(|| writer.flush())
+    } else {
+        writer.flush()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn write_body(
     cfg: &Config,
@@ -1061,7 +1109,7 @@ async fn write_body(
             }
             std::fs::File::create(dest)?
         };
-        Some(f)
+        Some(BufWriter::with_capacity(WRITE_BUF_CAP, f))
     };
 
     if let Some(prefix) = header_prefix {
@@ -1110,11 +1158,14 @@ async fn write_body(
                 t.push(data);
             }
             if let Some(f) = file.as_mut() {
-                f.write_all(data)?;
+                write_all_blocking(f, data)?;
             } else {
                 std::io::stdout().write_all(data)?;
             }
         }
+    }
+    if let Some(f) = file.as_mut() {
+        flush_blocking(f)?;
     }
     progress.finish();
     Ok((written, tee.and_then(|t| t.finish())))
@@ -1122,7 +1173,7 @@ async fn write_body(
 
 struct WarcTee {
     mem: Option<Vec<u8>>,
-    file: Option<(std::fs::File, std::path::PathBuf)>,
+    file: Option<(BufWriter<std::fs::File>, std::path::PathBuf)>,
     overflowed: bool,
 }
 
@@ -1141,7 +1192,7 @@ impl WarcTee {
             let file = std::fs::File::create(&path)?;
             Ok(Self {
                 mem: None,
-                file: Some((file, path)),
+                file: Some((BufWriter::with_capacity(WRITE_BUF_CAP, file), path)),
                 overflowed: false,
             })
         } else {
@@ -1176,14 +1227,16 @@ impl WarcTee {
         }
     }
 
-    fn finish(self) -> Option<Vec<u8>> {
+    fn finish(mut self) -> Option<Vec<u8>> {
         if self.overflowed {
-            if let Some((_, path)) = self.file {
+            if let Some((_, path)) = self.file.take() {
                 let _ = std::fs::remove_file(path);
             }
             return None;
         }
-        if let Some((_, path)) = self.file {
+        if let Some((mut f, path)) = self.file.take() {
+            let _ = f.flush();
+            drop(f);
             let data = std::fs::read(&path).ok();
             let _ = std::fs::remove_file(&path);
             return data;
@@ -1195,7 +1248,7 @@ impl WarcTee {
 #[allow(clippy::too_many_arguments)]
 async fn write_body_gzip(
     mut body: Incoming,
-    mut file: Option<std::fs::File>,
+    mut file: Option<BufWriter<std::fs::File>>,
     mut progress: ProgressBar,
     mut limiter: Option<RateLimiter>,
     gzip_cap: u64,
@@ -1206,7 +1259,7 @@ async fn write_body_gzip(
     use flate2::write::GzDecoder;
 
     struct CapWriter<'a> {
-        file: &'a mut Option<std::fs::File>,
+        file: &'a mut Option<BufWriter<std::fs::File>>,
         written: u64,
         cap: u64,
     }
@@ -1217,7 +1270,7 @@ async fn write_body_gzip(
                 return Err(std::io::Error::other("gzip too large"));
             }
             if let Some(f) = self.file.as_mut() {
-                f.write_all(buf)?;
+                write_all_blocking(f, buf)?;
             } else {
                 std::io::stdout().write_all(buf)?;
             }
@@ -1227,7 +1280,7 @@ async fn write_body_gzip(
 
         fn flush(&mut self) -> std::io::Result<()> {
             if let Some(f) = self.file.as_mut() {
-                f.flush()?;
+                flush_blocking(f)?;
             } else {
                 std::io::stdout().flush()?;
             }
@@ -1240,41 +1293,47 @@ async fn write_body_gzip(
     } else {
         None
     };
-    let mut sink = CapWriter {
-        file: &mut file,
-        written: 0,
-        cap: gzip_cap,
-    };
-    {
-        let mut decoder = GzDecoder::new(&mut sink);
-        while let Some(frame) = next_frame(&mut body, read_to).await? {
-            if let Some(data) = frame.data_ref() {
-                if let Some(lim) = limiter.as_mut() {
-                    lim.take(data.len() as u64).await;
-                }
-                progress.update(data.len() as u64);
-                if let Some(t) = tee.as_mut() {
-                    t.push(data);
-                }
-                decoder.write_all(data).map_err(|e| {
-                    if e.to_string().contains("gzip too large") {
-                        Error::Protocol("gzip too large".into())
-                    } else {
-                        Error::Protocol(format!("gzip: {e}"))
+    let written = {
+        let mut sink = CapWriter {
+            file: &mut file,
+            written: 0,
+            cap: gzip_cap,
+        };
+        {
+            let mut decoder = GzDecoder::new(&mut sink);
+            while let Some(frame) = next_frame(&mut body, read_to).await? {
+                if let Some(data) = frame.data_ref() {
+                    if let Some(lim) = limiter.as_mut() {
+                        lim.take(data.len() as u64).await;
                     }
-                })?;
+                    progress.update(data.len() as u64);
+                    if let Some(t) = tee.as_mut() {
+                        t.push(data);
+                    }
+                    decoder.write_all(data).map_err(|e| {
+                        if e.to_string().contains("gzip too large") {
+                            Error::Protocol("gzip too large".into())
+                        } else {
+                            Error::Protocol(format!("gzip: {e}"))
+                        }
+                    })?;
+                }
             }
+            decoder.try_finish().map_err(|e| {
+                if e.to_string().contains("gzip too large") {
+                    Error::Protocol("gzip too large".into())
+                } else {
+                    Error::Protocol(format!("gzip: {e}"))
+                }
+            })?;
         }
-        decoder.try_finish().map_err(|e| {
-            if e.to_string().contains("gzip too large") {
-                Error::Protocol("gzip too large".into())
-            } else {
-                Error::Protocol(format!("gzip: {e}"))
-            }
-        })?;
+        sink.written
+    };
+    if let Some(f) = file.as_mut() {
+        flush_blocking(f)?;
     }
     progress.finish();
-    Ok((sink.written, tee.and_then(|t| t.finish())))
+    Ok((written, tee.and_then(|t| t.finish())))
 }
 
 /// Uncompressed gzip budget: at least 256 MiB, or Content-Length * 32 when known.

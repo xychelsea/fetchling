@@ -220,13 +220,15 @@ pub async fn connect_tcp(cfg: &Config, addr: SocketAddr) -> Result<TcpStream> {
         }
     };
 
-    if let Some(t) = connect_timeout {
+    let stream = if let Some(t) = connect_timeout {
         timeout(t, fut)
             .await
             .map_err(|_| Error::Network(format!("connect timeout to {addr}")))?
     } else {
         fut.await
-    }
+    }?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
 }
 
 async fn resolve_bind_addr(bind: &str, peer: SocketAddr) -> Result<SocketAddr> {

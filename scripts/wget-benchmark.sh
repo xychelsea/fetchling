@@ -4,7 +4,7 @@
 # CARGO_TARGET_DIR / target/). Builds release fetchling if none is found.
 #
 # Usage:
-#   ./scripts/wget-bench.sh
+#   ./scripts/wget-benchmark.sh
 #
 # Optional environment:
 #   FETCHLING_BIN   Path to fetchling binary
@@ -14,7 +14,9 @@
 #   LARGE_MIB       Large fixture size in MiB (default: 256)
 #   MULTI_PARTS     Number of multi-URL parts (default: 16)
 #   MULTI_PART_MIB  Size of each multi-URL part in MiB (default: 4)
-#   MAX_THREADS     fetchling --max-threads for multi (default: 8)
+#   MAX_THREADS      fetchling --max-threads for multi (default: 8)
+#   PER_HOST_THREADS fetchling --max-threads-per-host for multi
+#                    (default: min(MAX_THREADS, 4), matching the CLI default)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -60,6 +62,13 @@ LARGE_MIB="${LARGE_MIB:-256}"
 MULTI_PARTS="${MULTI_PARTS:-16}"
 MULTI_PART_MIB="${MULTI_PART_MIB:-4}"
 MAX_THREADS="${MAX_THREADS:-8}"
+if [[ -z "${PER_HOST_THREADS:-}" ]]; then
+  if (( MAX_THREADS < 4 )); then
+    PER_HOST_THREADS="$MAX_THREADS"
+  else
+    PER_HOST_THREADS=4
+  fi
+fi
 MULTI_TOTAL_MIB=$((MULTI_PARTS * MULTI_PART_MIB))
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/fetchling-wget-bench.XXXXXX")"
@@ -79,7 +88,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as httpd:
     port = httpd.server_address[1]
     port_file.write_text(str(port))
     httpd.serve_forever()
@@ -130,7 +143,8 @@ run_fl_multi() {
   local d="$1"
   rm -rf "$d"
   mkdir -p "$d"
-  (cd "$d" && "$FL" -q --tries=1 --max-threads "$MAX_THREADS" -i "$URLS")
+  (cd "$d" && "$FL" -q --tries=1 --max-threads "$MAX_THREADS" \
+    --max-threads-per-host "$PER_HOST_THREADS" -i "$URLS")
 }
 
 run_wg_multi() {
@@ -187,7 +201,7 @@ echo
 
 # --- multi ---
 echo "=== multi (${MULTI_PARTS} x ${MULTI_PART_MIB} MiB = ${MULTI_TOTAL_MIB} MiB), ${MULTI_RUNS} timed runs after warmup ==="
-echo "fetchling: --max-threads ${MAX_THREADS} with -i urls.txt"
+echo "fetchling: --max-threads ${MAX_THREADS} --max-threads-per-host ${PER_HOST_THREADS} with -i urls.txt"
 echo "wget:      sequential loop over the same URLs"
 run_fl_multi "$OUT/fl-multi"
 run_wg_multi "$OUT/wg-multi"
@@ -223,8 +237,8 @@ awk -v fl="$SMALL_FL_MEAN" -v wg="$SMALL_WG_MEAN" 'BEGIN{
 awk -v fl="$LARGE_FL_MEAN" -v wg="$LARGE_WG_MEAN" -v flm="$LARGE_FL_MIB_S" -v wgm="$LARGE_WG_MIB_S" 'BEGIN{
   printf "large:  fetchling %ss (%.2f MiB/s)  wget %ss (%.2f MiB/s)  ratio(fl/wg)=%.3f\n", fl, flm, wg, wgm, fl/wg
 }'
-awk -v fl="$MULTI_FL_MEAN" -v wg="$MULTI_WG_MEAN" -v flm="$MULTI_FL_MIB_S" -v wgm="$MULTI_WG_MIB_S" -v thr="$MAX_THREADS" 'BEGIN{
-  printf "multi:  fetchling %ss (%.2f MiB/s, --max-threads %s)  wget %ss (%.2f MiB/s, sequential)  ratio(fl/wg)=%.3f\n", fl, flm, thr, wg, wgm, fl/wg
+awk -v fl="$MULTI_FL_MEAN" -v wg="$MULTI_WG_MEAN" -v flm="$MULTI_FL_MIB_S" -v wgm="$MULTI_WG_MIB_S" -v thr="$MAX_THREADS" -v per="$PER_HOST_THREADS" 'BEGIN{
+  printf "multi:  fetchling %ss (%.2f MiB/s, --max-threads %s --max-threads-per-host %s)  wget %ss (%.2f MiB/s, sequential)  ratio(fl/wg)=%.3f\n", fl, flm, thr, per, wg, wgm, fl/wg
 }'
 echo "integrity: small fl=$SMALL_FL_OK wg=$SMALL_WG_OK | large fl=$LARGE_FL_OK wg=$LARGE_WG_OK | multi fl=$MULTI_FL_OK wg=$MULTI_WG_OK"
 echo "note: localhost only; measures client stack + concurrency, not WAN RTT."
