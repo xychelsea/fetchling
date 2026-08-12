@@ -773,11 +773,13 @@ mod tests {
     fn logger_writes_errors_to_logfile() {
         let dir = TempDir::new("fetchling-log");
         let log_path = dir.path().join("out.log");
-        let mut cfg = Config::default();
-        cfg.quiet = true;
-        cfg.verbose = false;
-        cfg.logfile = Some(log_path.display().to_string());
-        cfg.append_output = false;
+        let cfg = Config {
+            quiet: true,
+            verbose: false,
+            logfile: Some(log_path.display().to_string()),
+            append_output: false,
+            ..Default::default()
+        };
 
         let log = Logger::new(&cfg).unwrap();
         log.error("boom");
@@ -795,9 +797,11 @@ mod tests {
         let log_path = dir.path().join("out.log");
         std::fs::write(&log_path, "prior\n").unwrap();
 
-        let mut cfg = Config::default();
-        cfg.logfile = Some(log_path.display().to_string());
-        cfg.append_output = false;
+        let mut cfg = Config {
+            logfile: Some(log_path.display().to_string()),
+            append_output: false,
+            ..Default::default()
+        };
         {
             let log = Logger::new(&cfg).unwrap();
             log.error("fresh");

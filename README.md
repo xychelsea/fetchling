@@ -87,7 +87,7 @@ cargo install --git https://github.com/xychelsea/fetchling fetchling
 A development build can also be produced with a temporary Nix shell (my environment):
 
 ```console
-nix-shell -p cargo cargo-deny rustc -I nixpkgs=channel:nixos-unstable \
+nix-shell -p cargo cargo-deny clippy rustc -I nixpkgs=channel:nixos-unstable \
   --run 'cargo build --release -p fetchling'
 ```
 

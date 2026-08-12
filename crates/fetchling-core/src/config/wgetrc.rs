@@ -389,9 +389,11 @@ mod tests {
             std::env::set_var("WGETRC", &user);
         }
 
-        let mut c = Config::default();
-        c.config_file = None;
-        c.no_config = false;
+        let mut c = Config {
+            config_file: None,
+            no_config: false,
+            ..Default::default()
+        };
         let result = load_wgetrc_files(&mut c);
 
         // SAFETY: restore previous env under the same lock.

@@ -248,7 +248,10 @@ default
 
     #[test]
     fn parse_errors_missing_values() {
-        assert!(parse_netrc("machine").unwrap_err().to_string().contains("machine missing host"));
+        assert!(parse_netrc("machine")
+            .unwrap_err()
+            .to_string()
+            .contains("machine missing host"));
         assert!(parse_netrc("machine h\nlogin")
             .unwrap_err()
             .to_string()

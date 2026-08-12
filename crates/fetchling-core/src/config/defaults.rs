@@ -596,8 +596,10 @@ mod tests {
 
     #[test]
     fn apply_mirror_sets_recursive_infinite_timestamping() {
-        let mut c = Config::default();
-        c.remove_listing = true;
+        let mut c = Config {
+            remove_listing: true,
+            ..Default::default()
+        };
         c.apply_mirror();
         assert!(c.recursive);
         assert_eq!(c.level, -1);
@@ -617,9 +619,11 @@ mod tests {
 
     #[test]
     fn effective_max_threads_per_host_defaults_to_min_of_max_and_four() {
-        let mut c = Config::default();
-        c.max_threads = 8;
-        c.max_threads_per_host = 0;
+        let mut c = Config {
+            max_threads: 8,
+            max_threads_per_host: 0,
+            ..Default::default()
+        };
         assert_eq!(c.effective_max_threads_per_host(), 4);
 
         c.max_threads = 2;
@@ -631,15 +635,19 @@ mod tests {
 
     #[test]
     fn finalize_concurrency_fills_unset_host_limit() {
-        let mut c = Config::default();
-        c.max_threads = 8;
-        c.max_threads_per_host = 0;
+        let mut c = Config {
+            max_threads: 8,
+            max_threads_per_host: 0,
+            ..Default::default()
+        };
         c.finalize_concurrency();
         assert_eq!(c.max_threads_per_host, 4);
 
-        let mut c = Config::default();
-        c.max_threads = 8;
-        c.max_threads_per_host = 2;
+        let mut c = Config {
+            max_threads: 8,
+            max_threads_per_host: 2,
+            ..Default::default()
+        };
         c.finalize_concurrency();
         assert_eq!(c.max_threads_per_host, 2);
     }
