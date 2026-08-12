@@ -103,4 +103,26 @@ mod tests {
         assert!(match_glob("a1b", "a[0-9]b", false));
         assert!(!match_glob("axb", "a[0-9]b", false));
     }
+
+    #[test]
+    fn glob_ignore_case() {
+        assert!(match_glob("File.TXT", "*.txt", true));
+        assert!(!match_glob("File.TXT", "*.txt", false));
+    }
+
+    #[test]
+    fn glob_multi_star_and_negated_class() {
+        assert!(match_glob("a/b/c.txt", "a/*/c.txt", false));
+        assert!(match_glob("ab", "a*b", false));
+        assert!(match_glob("axb", "a[!0-9]b", false));
+        assert!(!match_glob("a1b", "a[!0-9]b", false));
+        assert!(match_glob("axb", "a[^0-9]b", false));
+        assert!(!match_glob("a1b", "a[^0-9]b", false));
+    }
+
+    #[test]
+    fn glob_unclosed_bracket_does_not_match() {
+        assert!(!match_glob("a", "a[bc", false));
+        assert!(!match_glob("ab", "a[b", false));
+    }
 }

@@ -163,9 +163,65 @@ mod tests {
     }
 
     #[test]
-    fn network_error_maps_to_network_exit() {
-        let e = Error::Network("connect refused".into());
-        assert_eq!(e.exit_code(), ExitCode::Network);
+    fn worse_severity_order_and_identity() {
+        let order = [
+            ExitCode::Success,
+            ExitCode::Generic,
+            ExitCode::Parse,
+            ExitCode::Server,
+            ExitCode::Io,
+            ExitCode::Protocol,
+            ExitCode::Network,
+            ExitCode::Ssl,
+            ExitCode::Auth,
+        ];
+        for window in order.windows(2) {
+            assert_eq!(window[0].worse(window[1]), window[1]);
+            assert_eq!(window[1].worse(window[0]), window[1]);
+        }
+        for &code in &order {
+            assert_eq!(code.worse(code), code);
+        }
+    }
+
+    #[test]
+    fn exit_code_display_is_numeric() {
+        assert_eq!(ExitCode::Success.to_string(), "0");
+        assert_eq!(ExitCode::Network.to_string(), "4");
+        assert_eq!(ExitCode::Auth.to_string(), "6");
+    }
+
+    #[test]
+    fn error_variants_map_to_exit_codes() {
+        assert_eq!(
+            Error::InvalidOption("x".into()).exit_code(),
+            ExitCode::Parse
+        );
+        assert_eq!(
+            Error::DeferredOption("y".into()).exit_code(),
+            ExitCode::Parse
+        );
+        assert_eq!(Error::Parse("z".into()).exit_code(), ExitCode::Parse);
+        assert_eq!(
+            Error::Io(std::io::Error::other("io")).exit_code(),
+            ExitCode::Io
+        );
+        assert_eq!(
+            Error::Network("connect refused".into()).exit_code(),
+            ExitCode::Network
+        );
+        assert_eq!(Error::Tls("handshake".into()).exit_code(), ExitCode::Ssl);
+        assert_eq!(Error::Auth("denied".into()).exit_code(), ExitCode::Auth);
+        assert_eq!(
+            Error::Protocol("bad".into()).exit_code(),
+            ExitCode::Protocol
+        );
+        assert_eq!(Error::Server("500".into()).exit_code(), ExitCode::Server);
+        assert_eq!(
+            Error::Url(url::ParseError::EmptyHost).exit_code(),
+            ExitCode::Parse
+        );
+        assert_eq!(Error::Message("oops".into()).exit_code(), ExitCode::Generic);
     }
 
     #[test]

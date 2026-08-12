@@ -59,8 +59,16 @@ mod tests {
     }
 
     #[test]
+    fn decode_defaults_to_utf8_when_label_missing() {
+        assert_eq!(decode_bytes(b"hello", None).unwrap(), "hello");
+        assert_eq!(decode_bytes(b"hello", Some("")).unwrap(), "hello");
+        assert_eq!(decode_bytes(b"hello", Some("  ")).unwrap(), "hello");
+    }
+
+    #[test]
     fn unknown_label_errors() {
         assert!(resolve_encoding("not-a-real-encoding").is_err());
+        assert!(decode_bytes(b"x", Some("not-a-real-encoding")).is_err());
     }
 
     #[test]
@@ -72,6 +80,10 @@ mod tests {
         assert_eq!(
             charset_from_content_type(r#"text/html; charset="utf-8""#).as_deref(),
             Some("utf-8")
+        );
+        assert_eq!(
+            charset_from_content_type("text/html; charset='latin1'").as_deref(),
+            Some("latin1")
         );
         assert_eq!(charset_from_content_type("text/html"), None);
     }

@@ -117,12 +117,28 @@ mod tests {
         let u = FetchUrl::parse("example.com/a").unwrap();
         assert_eq!(u.scheme(), "http");
         assert_eq!(u.host_str(), Some("example.com"));
+        assert_eq!(u.path(), "/a");
+    }
+
+    #[test]
+    fn scheme_present_unchanged() {
+        let u = FetchUrl::parse("https://example.com/a").unwrap();
+        assert_eq!(u.scheme(), "https");
+        assert_eq!(u.as_str(), "https://example.com/a");
     }
 
     #[test]
     fn no_iri_rejects_non_ascii() {
         assert!(FetchUrl::parse_iri("http://example.com/café", false).is_err());
         assert!(FetchUrl::parse_iri("http://example.com/cafe", false).is_ok());
+    }
+
+    #[test]
+    fn normalize_url_error_message() {
+        let err = normalize_url("http://").unwrap_err();
+        assert!(err.to_string().contains("bad URL"));
+        let err = normalize_url_iri("http://example.com/café", false).unwrap_err();
+        assert!(err.to_string().contains("bad URL"));
     }
 
     #[test]

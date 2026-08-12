@@ -742,4 +742,77 @@ mod tests {
     fn format_saving_as_name_only() {
         assert_eq!(format_saving_as("file.bin"), "  saving as file.bin");
     }
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn logger_writes_errors_to_logfile() {
+        let dir = TempDir::new("fetchling-log");
+        let log_path = dir.path().join("out.log");
+        let mut cfg = Config::default();
+        cfg.quiet = true;
+        cfg.verbose = false;
+        cfg.logfile = Some(log_path.display().to_string());
+        cfg.append_output = false;
+
+        let log = Logger::new(&cfg).unwrap();
+        log.error("boom");
+        // info is suppressed when not verbose
+        log.info("hidden");
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("boom"), "{contents}");
+        assert!(!contents.contains("hidden"), "{contents}");
+    }
+
+    #[test]
+    fn logger_append_vs_truncate() {
+        let dir = TempDir::new("fetchling-log-append");
+        let log_path = dir.path().join("out.log");
+        std::fs::write(&log_path, "prior\n").unwrap();
+
+        let mut cfg = Config::default();
+        cfg.logfile = Some(log_path.display().to_string());
+        cfg.append_output = false;
+        {
+            let log = Logger::new(&cfg).unwrap();
+            log.error("fresh");
+        }
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(!contents.contains("prior"), "{contents}");
+        assert!(contents.contains("fresh"), "{contents}");
+
+        cfg.append_output = true;
+        {
+            let log = Logger::new(&cfg).unwrap();
+            log.error("again");
+        }
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("fresh"), "{contents}");
+        assert!(contents.contains("again"), "{contents}");
+    }
 }

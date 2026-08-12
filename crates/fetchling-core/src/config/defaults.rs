@@ -589,3 +589,58 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_mirror_sets_recursive_infinite_timestamping() {
+        let mut c = Config::default();
+        c.remove_listing = true;
+        c.apply_mirror();
+        assert!(c.recursive);
+        assert_eq!(c.level, -1);
+        assert!(c.timestamping);
+        assert!(!c.remove_listing);
+    }
+
+    #[test]
+    fn apply_timeout_sets_all_timeout_fields() {
+        let mut c = Config::default();
+        c.apply_timeout(30.0);
+        assert_eq!(c.timeout, Some(30.0));
+        assert_eq!(c.dns_timeout, Some(30.0));
+        assert_eq!(c.connect_timeout, Some(30.0));
+        assert_eq!(c.read_timeout, Some(30.0));
+    }
+
+    #[test]
+    fn effective_max_threads_per_host_defaults_to_min_of_max_and_four() {
+        let mut c = Config::default();
+        c.max_threads = 8;
+        c.max_threads_per_host = 0;
+        assert_eq!(c.effective_max_threads_per_host(), 4);
+
+        c.max_threads = 2;
+        assert_eq!(c.effective_max_threads_per_host(), 2);
+
+        c.max_threads_per_host = 3;
+        assert_eq!(c.effective_max_threads_per_host(), 3);
+    }
+
+    #[test]
+    fn finalize_concurrency_fills_unset_host_limit() {
+        let mut c = Config::default();
+        c.max_threads = 8;
+        c.max_threads_per_host = 0;
+        c.finalize_concurrency();
+        assert_eq!(c.max_threads_per_host, 4);
+
+        let mut c = Config::default();
+        c.max_threads = 8;
+        c.max_threads_per_host = 2;
+        c.finalize_concurrency();
+        assert_eq!(c.max_threads_per_host, 2);
+    }
+}
