@@ -1,7 +1,14 @@
+//! Character-set resolution and byte decoding helpers.
+
 use encoding_rs::Encoding;
 
 use crate::{Error, Result};
 
+/// Resolve an IANA/WHATWG encoding label (e.g. `UTF-8`, `ISO-8859-1`).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for an unknown label.
 pub fn resolve_encoding(label: &str) -> Result<&'static Encoding> {
     Encoding::for_label(label.trim().as_bytes()).ok_or_else(|| {
         Error::Parse(format!(
@@ -10,6 +17,12 @@ pub fn resolve_encoding(label: &str) -> Result<&'static Encoding> {
     })
 }
 
+/// Decode `bytes` using `label`, or UTF-8 when `label` is missing/empty.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) if `label` is present and not a
+/// known encoding.
 pub fn decode_bytes(bytes: &[u8], label: Option<&str>) -> Result<String> {
     let encoding = match label {
         Some(l) if !l.trim().is_empty() => resolve_encoding(l)?,
@@ -19,6 +32,7 @@ pub fn decode_bytes(bytes: &[u8], label: Option<&str>) -> Result<String> {
     Ok(cow.into_owned())
 }
 
+/// Extract a `charset=` value from a `Content-Type` header, if present.
 pub fn charset_from_content_type(content_type: &str) -> Option<String> {
     for part in content_type.split(';').skip(1) {
         let part = part.trim();

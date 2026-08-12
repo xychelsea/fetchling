@@ -1,3 +1,5 @@
+//! Configuration defaults, `.netrc` credentials, and `.wgetrc` / `-e` commands.
+
 mod defaults;
 mod netrc;
 mod wgetrc;

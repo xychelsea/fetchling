@@ -1,5 +1,6 @@
 //! Simple glob matching for accept lists and FTP patterns.
 
+/// Match `name` against glob `pat` (`*`, `?`, `[…]`); optionally case-insensitive.
 pub fn match_glob(name: &str, pat: &str, ignore_case: bool) -> bool {
     let (name, pat) = if ignore_case {
         (name.to_ascii_lowercase(), pat.to_ascii_lowercase())

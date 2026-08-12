@@ -1,17 +1,33 @@
+//! URL parsing and normalization helpers.
+
 use url::Url;
 
 use crate::{Error, Result};
 
+/// Parsed URL used throughout fetchling (scheme defaults to `http` for bare hosts).
 #[derive(Debug, Clone)]
 pub struct FetchUrl {
+    /// Underlying [`url::Url`].
     pub url: Url,
 }
 
 impl FetchUrl {
+    /// Parse `input`, allowing non-ASCII (IRI) characters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Url`](crate::Error::Url) when the string is not a valid URL.
     pub fn parse(input: &str) -> Result<Self> {
         Self::parse_iri(input, true)
     }
 
+    /// Parse `input`. When `allow_iri` is false, reject non-ASCII strings.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Parse`](crate::Error::Parse) if `allow_iri` is false and `input`
+    ///   contains non-ASCII characters
+    /// - [`Error::Url`](crate::Error::Url) if the string is not a valid URL
     pub fn parse_iri(input: &str, allow_iri: bool) -> Result<Self> {
         if !allow_iri && !input.is_ascii() {
             return Err(Error::Parse(format!(
@@ -26,27 +42,43 @@ impl FetchUrl {
         Ok(Self { url })
     }
 
+    /// URL scheme (`http`, `https`, `ftp`, …).
     pub fn scheme(&self) -> &str {
         self.url.scheme()
     }
 
+    /// Host component, if any.
     pub fn host_str(&self) -> Option<&str> {
         self.url.host_str()
     }
 
+    /// Path component.
     pub fn path(&self) -> &str {
         self.url.path()
     }
 
+    /// Full URL string.
     pub fn as_str(&self) -> &str {
         self.url.as_str()
     }
 }
 
+/// Normalize a URL string (IRIs allowed). Prefers a clearer error message than bare parse.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) with a `bad URL '…'` message when
+/// parsing fails.
 pub fn normalize_url(input: &str) -> Result<FetchUrl> {
     normalize_url_iri(input, true)
 }
 
+/// Normalize a URL string with optional IRI rejection.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) when the URL is invalid or when
+/// `allow_iri` is false and `input` is non-ASCII.
 pub fn normalize_url_iri(input: &str, allow_iri: bool) -> Result<FetchUrl> {
     FetchUrl::parse_iri(input, allow_iri)
         .map_err(|e| Error::Parse(format!("bad URL '{input}': {e}")))

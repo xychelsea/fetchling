@@ -1,16 +1,28 @@
+//! Process exit codes and the crate [`Error`](crate::Error) type.
+
 use std::fmt;
 
+/// Process exit status codes (wget-compatible numeric values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
+    /// Successful completion.
     Success = 0,
+    /// Unspecified or generic failure.
     Generic = 1,
+    /// CLI/config/URL parse failure.
     Parse = 2,
+    /// Local filesystem or I/O failure.
     Io = 3,
+    /// Network connectivity or DNS failure.
     Network = 4,
+    /// TLS/SSL failure.
     Ssl = 5,
+    /// Authentication failure.
     Auth = 6,
+    /// Protocol-level failure.
     Protocol = 7,
+    /// Remote server error response.
     Server = 8,
 }
 
@@ -35,6 +47,10 @@ impl ExitCode {
         }
     }
 
+    /// Return the more severe of `self` and `other` (for aggregating multi-URL runs).
+    ///
+    /// Severity order (highest first): Auth, Ssl, Network, Protocol, Io, Server,
+    /// Parse, Generic, Success.
     pub fn worse(self, other: ExitCode) -> ExitCode {
         if other.severity() > self.severity() {
             other
@@ -44,43 +60,56 @@ impl ExitCode {
     }
 }
 
+/// Error type for fetchling core and dependent crates.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Generic message without a more specific category.
     #[error("{0}")]
     Message(String),
 
+    /// Unknown or invalid CLI/config option.
     #[error("invalid option: {0}")]
     InvalidOption(String),
 
+    /// Recognized but intentionally deferred/unimplemented option.
     #[error("deferred option: --{0}")]
     DeferredOption(String),
 
+    /// Value parse failure (bytes, duration, URL text, …).
     #[error("parse error: {0}")]
     Parse(String),
 
+    /// Local I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Network/DNS/connect failure.
     #[error("network error: {0}")]
     Network(String),
 
+    /// TLS failure.
     #[error("TLS error: {0}")]
     Tls(String),
 
+    /// Authentication failure.
     #[error("auth error: {0}")]
     Auth(String),
 
+    /// Protocol misuse or unexpected protocol state.
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// HTTP/FTP server error or unexpected status.
     #[error("server error: {0}")]
     Server(String),
 
+    /// [`url::Url`] parse failure.
     #[error("URL error: {0}")]
     Url(#[from] url::ParseError),
 }
 
 impl Error {
+    /// Map this error to a process [`ExitCode`].
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Error::InvalidOption(_) | Error::DeferredOption(_) | Error::Parse(_) => ExitCode::Parse,
@@ -95,6 +124,7 @@ impl Error {
         }
     }
 
+    /// Whether this looks like a host-level DNS failure (retry-on-host-error).
     pub fn is_host_error(&self) -> bool {
         match self {
             Error::Network(s) => {
@@ -107,6 +137,7 @@ impl Error {
     }
 }
 
+/// Result alias using [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl fmt::Display for ExitCode {

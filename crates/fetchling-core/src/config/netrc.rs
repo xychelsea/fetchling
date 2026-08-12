@@ -1,14 +1,20 @@
+//! `.netrc` parsing and credential lookup.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
+/// Login/password pair from a `.netrc` machine or default entry.
 #[derive(Debug, Clone, Default)]
 pub struct NetrcEntry {
+    /// `login` token value.
     pub login: Option<String>,
+    /// `password` token value.
     pub password: Option<String>,
 }
 
+/// Parsed `.netrc` file (per-machine entries plus optional `default`).
 #[derive(Debug, Clone, Default)]
 pub struct Netrc {
     machines: HashMap<String, NetrcEntry>,
@@ -16,15 +22,23 @@ pub struct Netrc {
 }
 
 impl Netrc {
+    /// Look up credentials for `host`, falling back to the `default` entry.
     pub fn lookup(&self, host: &str) -> Option<&NetrcEntry> {
         self.machines.get(host).or(self.default.as_ref())
     }
 }
 
+/// Default path `$HOME/.netrc`, if `HOME` is set.
 pub fn default_netrc_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".netrc"))
 }
 
+/// Load and parse a `.netrc` file; warn on Unix when the file is group/world-readable.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`](crate::Error::Io) if the file cannot be read, or
+/// [`Error::Parse`](crate::Error::Parse) if the contents are invalid.
 pub fn load_netrc(path: &Path) -> Result<Netrc> {
     #[cfg(unix)]
     {
@@ -48,6 +62,28 @@ pub fn load_netrc(path: &Path) -> Result<Netrc> {
     parse_netrc(&text)
 }
 
+/// Parse `.netrc` text into a [`Netrc`] map.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for malformed tokens (for
+/// example `machine` without a host).
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_core::parse_netrc;
+///
+/// let netrc = parse_netrc(
+///     "machine example.com\n  login alice\n  password secret\ndefault\n  login anon\n",
+/// )
+/// .unwrap();
+/// assert_eq!(
+///     netrc.lookup("example.com").unwrap().login.as_deref(),
+///     Some("alice")
+/// );
+/// assert_eq!(netrc.lookup("other.org").unwrap().login.as_deref(), Some("anon"));
+/// ```
 pub fn parse_netrc(text: &str) -> Result<Netrc> {
     let mut netrc = Netrc::default();
     let mut tokens = Vec::new();
@@ -142,6 +178,7 @@ pub fn parse_netrc(text: &str) -> Result<Netrc> {
     Ok(netrc)
 }
 
+/// Load netrc (from `netrc_file` or `$HOME/.netrc`) and return `(login, password)` for `host`.
 pub fn lookup_credentials(host: &str, netrc_file: Option<&str>) -> Option<(String, String)> {
     let path = if let Some(p) = netrc_file {
         PathBuf::from(p)

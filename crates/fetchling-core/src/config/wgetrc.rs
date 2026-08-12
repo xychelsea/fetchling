@@ -1,4 +1,4 @@
-//! Minimal `.wgetrc` or `-e` command application
+//! Minimal `.wgetrc` or `-e` command application.
 
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,43 @@ use crate::{parse_bytes, parse_seconds, parse_tries, Error, Result};
 use super::Config;
 
 /// Apply a single wgetrc-style command (`key = value` or `key = on/off`).
+///
+/// # Syntax
+///
+/// - Blank lines and `#` comments are ignored
+/// - Keys are lowercased and `_` / `-` are stripped before matching
+///   (so `dns_timeout`, `dns-timeout`, and `dnstimeout` are equivalent)
+/// - Booleans accept `on` / `off` / `yes` / `no` / `true` / `false` / `1` / `0`
+///
+/// # Supported keys
+///
+/// `verbose`, `quiet`, `debug`, `recursive`, `timestamping`, `continue` /
+/// `alwaysrest`, `noclobber`, `spider`, `robots` (accepted with a warning; not
+/// applied), `tries` / `numtries`, `timeout`, `dns_timeout` / `dnstimeout`,
+/// `connecttimeout`, `readtimeout`, `wait`, `waitretry`, `limitrate`,
+/// `dirprefix`, `useragent`, `logfile`, `outputdocument`, `httpuser`,
+/// `httppassword` / `httppasswd`, `ftpuser`, `ftppassword` / `ftppasswd`,
+/// `user`, `password`, `checkcertificate`, `httpsonly`, `hsts`, `cookies`,
+/// `convertlinks`, `pagerequisites`, `spanhosts`, `noparent`, `mirror`,
+/// `reclevel`, `useproxy`, `passiveftp`, `netrc`, `iri`, `localencoding`,
+/// `remoteencoding`, `adjustextension` / `htmlextension`, `contentdisposition`,
+/// `maxredirect`, `quota`, `bindaddress`, `base`, `saveheaders`,
+/// `useservertimestamps`, `ifmodifiedsince`
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for a missing `=`, unknown key,
+/// or invalid value.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_core::{apply_wgetrc_command, Config};
+///
+/// let mut cfg = Config::default();
+/// apply_wgetrc_command(&mut cfg, "quiet = on").unwrap();
+/// assert!(cfg.quiet);
+/// ```
 pub fn apply_wgetrc_command(cfg: &mut Config, command: &str) -> Result<()> {
     let command = command.trim();
     if command.is_empty() || command.starts_with('#') {
@@ -105,7 +142,21 @@ pub fn apply_wgetrc_command(cfg: &mut Config, command: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load wgetrc files into `cfg` according to `--no-config` / `--config` / defaults.
+/// Load wgetrc files into `cfg`.
+///
+/// Search order when `config_file` is unset and `no_config` is false:
+///
+/// 1. `SYSTEM_WGETRC` if set, otherwise `/etc/wgetrc`
+/// 2. `WGETRC` if set, otherwise `$HOME/.wgetrc`
+///
+/// Missing default files are skipped. When `config_file` is set, that path is
+/// required and is the only file loaded. When `no_config` is true, nothing is
+/// loaded.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) if a required file cannot be
+/// read or a line fails [`apply_wgetrc_command`].
 pub fn load_wgetrc_files(cfg: &mut Config) -> Result<()> {
     if cfg.no_config {
         return Ok(());

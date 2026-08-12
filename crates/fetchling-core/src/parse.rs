@@ -5,12 +5,18 @@ use crate::{Error, Result};
 pub struct ByteSize(pub u64);
 
 impl ByteSize {
+    /// Return the size in bytes.
     pub fn get(self) -> u64 {
         self.0
     }
 }
 
 /// Parse byte amounts (`20k`, `1m`, plain integers).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for empty input or a non-numeric
+/// amount.
 pub fn parse_bytes(s: &str) -> Result<ByteSize> {
     let s = s.trim();
     if s.is_empty() {
@@ -36,6 +42,11 @@ pub fn parse_bytes(s: &str) -> Result<ByteSize> {
 }
 
 /// Parse durations (`30`, `1m`, `2h`, `1d`).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for empty input or a non-numeric
+/// duration.
 pub fn parse_seconds(s: &str) -> Result<f64> {
     let s = s.trim();
     if s.is_empty() {
@@ -61,6 +72,11 @@ pub fn parse_seconds(s: &str) -> Result<f64> {
 }
 
 /// Parse tries (`0` / `inf` = infinite, represented as 0).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) if the value is not `inf`, `0`,
+/// or an unsigned integer.
 pub fn parse_tries(s: &str) -> Result<u32> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("inf") || s == "0" {
