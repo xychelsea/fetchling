@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "fetchling-http for fetchling"
+readme = "README.md"
+description = "HTTP/1.1 retrieval with TLS, keep-alive pooling, cookies, and redirects for building a network retriever"
+keywords = ["http", "https", "download", "cookies", "fetchling"]
+categories = ["network-programming"]
 
 [dependencies]
 fetchling-core = { workspace = true }
