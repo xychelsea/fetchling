@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "fetchling-ftp for fetchling"
+readme = "README.md"
+description = "FTP/FTPS retrieval, listing, and glob expansion primitives for building a network retriever"
+keywords = ["ftp", "ftps", "download", "glob", "fetchling"]
+categories = ["network-programming"]
 
 [dependencies]
 fetchling-core = { workspace = true }
