@@ -2,16 +2,19 @@ use crate::options::{OptMeta, Section, OPTIONS};
 
 const DESCRIPTION: &str = "a modular, non-interactive, async network retriever written in Rust.";
 
+/// Print `fetchling {version}` to stdout.
 pub fn print_version_short() {
     println!("fetchling {}", env!("CARGO_PKG_VERSION"));
 }
 
+/// Print version, description, and license to stdout.
 pub fn print_version() {
     print_version_short();
     println!("{DESCRIPTION}");
     println!("MIT/Apache-2.0");
 }
 
+/// Print wget-style usage to stdout.
 pub fn print_help() {
     println!("fetchling {}", env!("CARGO_PKG_VERSION"));
     println!("{DESCRIPTION}");

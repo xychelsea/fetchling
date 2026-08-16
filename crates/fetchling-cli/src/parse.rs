@@ -6,14 +6,29 @@ use fetchling_core::{
 use crate::deferred::is_deferred_option;
 use crate::options::OPTIONS;
 
+/// Result of [`parse_args`].
 #[derive(Debug)]
 pub enum ParseOutcome {
+    /// `--help` / `-h`.
     Help,
+    /// `--version`.
     Version,
+    /// `-V`.
     VersionShort,
+    /// Ready [`Config`] (boxed).
     Run(Box<Config>),
 }
 
+/// Parse wget-style argv into a [`ParseOutcome`].
+///
+/// Strips argv0 when the basename is `fetchling`. Prescans `--config` /
+/// `--no-config`, loads wgetrc, then flags and URL operands.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidOption`] for an unknown flag or missing argument,
+/// [`Error::DeferredOption`] for an unimplemented flag, or [`Error::Parse`]
+/// for a bad numeric or list value or a wgetrc error.
 pub fn parse_args<I, S>(args: I) -> Result<ParseOutcome>
 where
     I: IntoIterator<Item = S>,
@@ -753,5 +768,133 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("cannot read config file"));
+    }
+
+    fn parse_run(args: &[&str]) -> Config {
+        let mut v = vec!["fetchling", "--no-config"];
+        v.extend(args);
+        match parse_args(v).unwrap() {
+            ParseOutcome::Run(c) => *c,
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn strips_exe_program_name_and_keeps_leading_flag() {
+        let out = parse_args(["fetchling.exe", "--no-config", "http://x"]).unwrap();
+        match out {
+            ParseOutcome::Run(c) => assert_eq!(c.urls, vec!["http://x"]),
+            _ => panic!("expected run"),
+        }
+        let out = parse_args(["fetchling.EXE", "--no-config", "http://x"]).unwrap();
+        match out {
+            ParseOutcome::Run(c) => assert_eq!(c.urls, vec!["http://x"]),
+            _ => panic!("expected run"),
+        }
+        let c = parse_args(["-q", "--no-config", "http://x"]).unwrap();
+        match c {
+            ParseOutcome::Run(c) => {
+                assert!(c.quiet);
+                assert_eq!(c.urls, vec!["http://x"]);
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn double_dash_treats_later_flags_as_urls() {
+        let c = parse_run(&["--", "-q", "http://x"]);
+        assert!(!c.quiet);
+        assert_eq!(c.urls, vec!["-q", "http://x"]);
+    }
+
+    #[test]
+    fn unknown_missing_and_invalid_shorts_are_errors() {
+        assert!(matches!(
+            parse_args(["fetchling", "--no-config", "--not-a-flag", "http://x"]).unwrap_err(),
+            Error::InvalidOption(_)
+        ));
+        assert!(matches!(
+            parse_args(["fetchling", "--no-config", "--output-document"]).unwrap_err(),
+            Error::InvalidOption(_)
+        ));
+        assert!(matches!(
+            parse_args(["fetchling", "--no-config", "-z", "http://x"]).unwrap_err(),
+            Error::InvalidOption(_)
+        ));
+        let err = parse_args(["fetchling", "--no-config", "-nX", "http://x"]).unwrap_err();
+        assert!(matches!(err, Error::InvalidOption(_)));
+        assert!(err.to_string().contains("nX"));
+    }
+
+    #[test]
+    fn combined_short_output_and_n_packs() {
+        let c = parse_run(&["-Ofile.bin", "http://x"]);
+        assert_eq!(c.output_document.as_deref(), Some("file.bin"));
+        let c = parse_run(&["-nd", "http://x"]);
+        assert!(!c.directories);
+        let c = parse_run(&["-nH", "http://x"]);
+        assert!(!c.host_directories);
+        let c = parse_run(&["-np", "http://x"]);
+        assert!(c.no_parent);
+        let c = parse_run(&["-nv", "http://x"]);
+        assert!(!c.verbose);
+        let c = parse_run(&["--no-verbose", "http://x"]);
+        assert!(!c.verbose);
+    }
+
+    #[test]
+    fn metalink_index_and_level_values() {
+        let c = parse_run(&["--metalink-index=inf", "http://x"]);
+        assert_eq!(c.metalink_index, 0);
+        assert!(matches!(
+            parse_args([
+                "fetchling",
+                "--no-config",
+                "--metalink-index=nope",
+                "http://x"
+            ])
+            .unwrap_err(),
+            Error::Parse(_)
+        ));
+        let c = parse_run(&["--level=inf", "http://x"]);
+        assert_eq!(c.level, -1);
+        let c = parse_run(&["--level=0", "http://x"]);
+        assert_eq!(c.level, -1);
+        let c = parse_run(&["--level=2", "http://x"]);
+        assert_eq!(c.level, 2);
+    }
+
+    #[test]
+    fn method_retry_lists_and_empty_accept() {
+        let c = parse_run(&["--method=post", "http://x"]);
+        assert_eq!(c.method.as_deref(), Some("POST"));
+        let c = parse_run(&["--retry-on-http-error=429,503", "http://x"]);
+        assert_eq!(c.retry_on_http_error, vec![429, 503]);
+        let c = parse_run(&["--restrict-file-names=unix,windows", "http://x"]);
+        assert_eq!(c.restrict_file_names, vec!["unix", "windows"]);
+        let c = parse_run(&["--accept=*.html,,*.htm", "http://x"]);
+        assert_eq!(c.accept, vec!["*.html", "*.htm"]);
+        let c = parse_run(&["--accept=", "http://x"]);
+        assert!(c.accept.is_empty());
+    }
+
+    #[test]
+    fn inet_proxy_report_speed_execute_and_headers() {
+        let c = parse_run(&["--inet4-only", "http://x"]);
+        assert!(c.inet4_only);
+        assert!(!c.inet6_only);
+        let c = parse_run(&["--inet6-only", "http://x"]);
+        assert!(c.inet6_only);
+        assert!(!c.inet4_only);
+        let c = parse_run(&["--proxy=http://p", "http://x"]);
+        assert_eq!(c.http_proxy.as_deref(), Some("http://p"));
+        assert_eq!(c.https_proxy.as_deref(), Some("http://p"));
+        let c = parse_run(&["--report-speed=bits", "http://x"]);
+        assert!(c.report_speed_bits);
+        let c = parse_run(&["-e", "quiet=on", "http://x"]);
+        assert!(c.quiet);
+        let c = parse_run(&["--header=A: 1", "--header=B: 2", "http://x"]);
+        assert_eq!(c.headers, vec!["A: 1", "B: 2"]);
     }
 }

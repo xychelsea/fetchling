@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Command-line option parsing for fetchling"
+readme = "README.md"
+description = "wget-compatible argv parsing into Config for building a network retriever"
+keywords = ["cli", "wget", "argv", "parse", "fetchling"]
+categories = ["command-line-interface"]
 
 [dependencies]
 fetchling-core = { workspace = true }

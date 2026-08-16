@@ -1295,3 +1295,32 @@ pub static OPTIONS: &[OptMeta] = &[
         help: "don't ascend to the parent directory",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_longs_unique_and_sections_titled() {
+        let mut longs: Vec<&str> = OPTIONS.iter().map(|o| o.long).collect();
+        let n = longs.len();
+        longs.sort_unstable();
+        longs.dedup();
+        assert_eq!(longs.len(), n);
+        for section in [
+            Section::Startup,
+            Section::Logging,
+            Section::Download,
+            Section::Directory,
+            Section::Http,
+            Section::Https,
+            Section::Warc,
+            Section::Ftp,
+            Section::Ftps,
+            Section::Recursive,
+            Section::AcceptReject,
+        ] {
+            assert!(!section.title().is_empty());
+        }
+    }
+}
