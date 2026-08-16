@@ -362,3 +362,272 @@ fn wgetrc_robots_command_parses() {
     .unwrap();
     assert!(matches!(out, ParseOutcome::Run(_)));
 }
+
+#[tokio::test]
+async fn gzip_content_encoding_decodes_body() {
+    let gzip = [
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xcb, 0x48, 0xcd, 0xc9, 0xc9,
+        0xd7, 0x4d, 0xaf, 0xca, 0x2c, 0x00, 0x00, 0xa8, 0xae, 0x42, 0x27, 0x0a, 0x00, 0x00, 0x00,
+    ];
+    let addr = spawn_http_once(
+        HttpResponse::ok(gzip).with_header("Content-Encoding", "gzip"),
+        None,
+    );
+    let dir = tempfile_dir();
+    let dest = dir.join("out.bin");
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "--compression=gzip",
+        "-O",
+        dest.to_str().unwrap(),
+        &format!("http://{addr}/file.bin"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello-gzip");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn header_and_user_agent_sent() {
+    let log = new_request_log();
+    let addr = spawn_http_once(HttpResponse::ok(b"ok"), Some(Arc::clone(&log)));
+    let dir = tempfile_dir();
+    let dest = dir.join("out.bin");
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "--header=X-Test: 1",
+        "-U",
+        "fetchling-it/1",
+        "-O",
+        dest.to_str().unwrap(),
+        &format!("http://{addr}/x"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    let req = log.lock().unwrap().join("\n");
+    let lower = req.to_ascii_lowercase();
+    assert!(
+        lower.contains("x-test: 1") && lower.contains("user-agent: fetchling-it/1"),
+        "expected custom header and UA: {req}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn post_data_sends_post_body() {
+    let log = new_request_log();
+    let addr = spawn_http_once(HttpResponse::ok(b"ok"), Some(Arc::clone(&log)));
+    let dir = tempfile_dir();
+    let dest = dir.join("out.bin");
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "--post-data=a=b",
+        "-O",
+        dest.to_str().unwrap(),
+        &format!("http://{addr}/x"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    let req = log.lock().unwrap().join("\n");
+    assert!(
+        req.starts_with("POST ") || req.contains("POST /"),
+        "expected POST: {req}"
+    );
+    assert!(req.contains("a=b"), "expected POST body: {req}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn no_clobber_leaves_existing_dest() {
+    let addr = spawn_http_once(HttpResponse::ok(b"new-bytes"), None);
+    let dir = tempfile_dir();
+    let dest = dir.join("keep.bin");
+    std::fs::write(&dest, b"keep-me").unwrap();
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "-nc",
+        "-P",
+        dir.to_str().unwrap(),
+        &format!("http://{addr}/keep.bin"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"keep-me");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn recurse_accept_html_skips_png() {
+    let log = new_request_log();
+    let addr = spawn_http_router(
+        vec![
+            (
+                "robots.txt".into(),
+                Box::new(|_| HttpResponse::ok(b"User-agent: *\nAllow: /\n")),
+            ),
+            (
+                "/index".into(),
+                Box::new(|_| {
+                    HttpResponse::html(
+                        b"<html><a href=\"ok.html\">y</a><a href=\"skip.png\">n</a></html>",
+                    )
+                }),
+            ),
+            ("/ok.html".into(), Box::new(|_| HttpResponse::ok(b"ok"))),
+            ("/skip.png".into(), Box::new(|_| HttpResponse::ok(b"png"))),
+        ],
+        16,
+        Some(Arc::clone(&log)),
+    );
+    let dir = tempfile_dir();
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "-r",
+        "-l",
+        "1",
+        "-A",
+        "*.html",
+        "-P",
+        dir.to_str().unwrap(),
+        &format!("http://{addr}/index.html"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    let reqs = log.lock().unwrap().clone();
+    assert!(
+        reqs.iter().any(|r| r.contains("/ok.html")),
+        "expected /ok.html: {reqs:?}"
+    );
+    assert!(
+        !reqs.iter().any(|r| r.contains("skip.png")),
+        "accept filter should skip png: {reqs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn recurse_follows_css_url() {
+    let log = new_request_log();
+    let addr = spawn_http_router(
+        vec![
+            (
+                "robots.txt".into(),
+                Box::new(|_| HttpResponse::ok(b"User-agent: *\nAllow: /\n")),
+            ),
+            (
+                "/page".into(),
+                Box::new(|_| HttpResponse::html(b"<html><link href=\"style.css\"></html>")),
+            ),
+            (
+                "/style.css".into(),
+                Box::new(|_| {
+                    HttpResponse::ok(b"body{background:url(asset.bin);}")
+                        .with_header("Content-Type", "text/css")
+                }),
+            ),
+            (
+                "/asset.bin".into(),
+                Box::new(|_| HttpResponse::ok(b"ASSET")),
+            ),
+        ],
+        16,
+        Some(Arc::clone(&log)),
+    );
+    let dir = tempfile_dir();
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "-r",
+        "-l",
+        "2",
+        "-P",
+        dir.to_str().unwrap(),
+        &format!("http://{addr}/page.html"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    let reqs = log.lock().unwrap().clone();
+    assert!(
+        reqs.iter().any(|r| r.contains("asset.bin")),
+        "expected CSS url() fetch: {reqs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn retries_http_503_then_succeeds() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let n = Arc::new(AtomicU32::new(0));
+    let n2 = Arc::clone(&n);
+    let addr = spawn_http_router(
+        vec![(
+            "/".into(),
+            Box::new(move |_| {
+                if n2.fetch_add(1, Ordering::SeqCst) == 0 {
+                    HttpResponse::ok(b"").status("HTTP/1.1 503 Service Unavailable")
+                } else {
+                    HttpResponse::ok(b"after-retry")
+                }
+            }),
+        )],
+        4,
+        None,
+    );
+    let dir = tempfile_dir();
+    let dest = dir.join("out.bin");
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=2",
+        "--waitretry=0",
+        "-O",
+        dest.to_str().unwrap(),
+        &format!("http://{addr}/file.bin"),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"after-retry");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn input_file_fetches_both_urls() {
+    let addr = spawn_http_router(
+        vec![
+            ("/a.bin".into(), Box::new(|_| HttpResponse::ok(b"aaa"))),
+            ("/b.bin".into(), Box::new(|_| HttpResponse::ok(b"bbb"))),
+        ],
+        4,
+        None,
+    );
+    let dir = tempfile_dir();
+    let list = dir.join("urls.txt");
+    std::fs::write(&list, format!("http://{addr}/a.bin\nhttp://{addr}/b.bin\n")).unwrap();
+    let code = run_fetchling([
+        "--no-config",
+        "-q",
+        "--tries=1",
+        "--max-threads=2",
+        "-P",
+        dir.to_str().unwrap(),
+        "-i",
+        list.to_str().unwrap(),
+    ])
+    .await;
+    assert_eq!(code, ExitCode::Success);
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), b"aaa");
+    assert_eq!(std::fs::read(dir.join("b.bin")).unwrap(), b"bbb");
+    let _ = std::fs::remove_dir_all(&dir);
+}
