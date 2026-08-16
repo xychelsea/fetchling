@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Shared types and parsers for fetchling"
+readme = "README.md"
+description = "Shared configuration, errors, logging, progress, and URL utilities for fetchling"
+keywords = ["wget", "download", "http", "config", "fetchling"]
+categories = ["network-programming", "config"]
 
 [dependencies]
 thiserror = { workspace = true }

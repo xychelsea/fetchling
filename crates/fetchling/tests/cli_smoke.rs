@@ -599,3 +599,122 @@ async fn no_iri_rejects_non_ascii_cli_url() {
         .expect_err("non-ascii should fail with --no-iri");
     assert!(err.to_string().contains("no-iri") || err.to_string().contains("non-ASCII"));
 }
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_fetchling")
+}
+
+#[test]
+fn binary_version_short_and_long() {
+    let out = std::process::Command::new(bin())
+        .args(["--no-config", "-V"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("fetchling "));
+    let out = std::process::Command::new(bin())
+        .args(["--no-config", "--version"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("fetchling "));
+    assert!(stdout.contains("a modular, non-interactive, async network retriever written in Rust."));
+}
+
+#[test]
+fn binary_help_prints_usage() {
+    let out = std::process::Command::new(bin())
+        .args(["--no-config", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Usage:"));
+}
+
+#[test]
+fn binary_deferred_exits_parse() {
+    let out = std::process::Command::new(bin())
+        .args(["--no-config", "--http2"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.to_ascii_lowercase().contains("deferred"));
+}
+
+#[test]
+fn binary_downloads_localhost_http() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = b"hello-bin";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(body);
+    });
+
+    let dir = tempfile_dir();
+    let dest = dir.join("out.bin");
+    let out = std::process::Command::new(bin())
+        .args([
+            "--no-config",
+            "-q",
+            "--tries=1",
+            "-O",
+            dest.to_str().unwrap(),
+            &format!("http://{addr}/file.bin"),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello-bin");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn binary_stdout_dash_o() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = b"hello-stdout";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(body);
+    });
+
+    let out = std::process::Command::new(bin())
+        .args([
+            "--no-config",
+            "-q",
+            "--tries=1",
+            "-O",
+            "-",
+            &format!("http://{addr}/file.bin"),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"hello-stdout");
+}

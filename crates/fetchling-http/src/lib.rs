@@ -1,4 +1,97 @@
-//! HTTP/1.1 retrieval with TLS connector reuse and keep-alive pooling.
+//! HTTP/1.1 retrieval with TLS, keep-alive pooling, cookies, and redirects.
+//!
+//! # What this crate is (and is not)
+//!
+//! IS: an HTTP/1.1 client ([`HttpClient`]) that downloads to a file (or stdout
+//! when `dest` is `-`), follows redirects, reuses keep-alive connections,
+//! stores cookies ([`Jar`]), upgrades via HSTS, talks through HTTP proxies
+//! (CONNECT for HTTPS), and optionally tees WARC request/response bytes onto
+//! [`FetchMeta`]. Header helpers ([`parse_content_disposition_filename`],
+//! [`parse_content_range_total`], [`resume_progress_total`]). The public API is
+//! flat at the crate root. Drive behavior with [`Config`] fields set directly;
+//! CLI / wget names in those field docs are compatibility aliases. [`HttpClient::download`]
+//! needs a Tokio runtime. Transport, TLS, proxies, and HSTS primitives come
+//! from `fetchling-net`.
+//!
+//! IS NOT: FTP, HTTP/2, recursive mirroring, HTML/CSS extraction, or writing
+//! `.warc` files (engine / `fetchling-formats`). This crate does not re-export
+//! [`Config`], [`Error`], or [`Logger`].
+//!
+//! # Typical integration
+//!
+//! 1. Start from [`Config::default`] and set HTTP fields (`user_agent`, proxies,
+//!    `cookies` / `load_cookies`, `hsts`, `continue_download`, `max_redirect`,
+//!    TLS via net fields)
+//! 2. Create [`Logger::new`] then [`HttpClient::new`]
+//! 3. Call [`HttpClient::download`]
+//! 4. Optionally [`HttpClient::save_cookies`] / [`HttpClient::save_hsts`]
+//! 5. Optionally use [`Jar`] or the Content-Disposition / Content-Range helpers
+//!
+//! # Areas
+//!
+//! - **Client** — [`HttpClient`]
+//! - **Outcome** — [`FetchMeta`]
+//! - **Cookies** — [`Jar`]
+//! - **Helpers** — [`parse_content_disposition_filename`],
+//!   [`parse_content_range_total`], [`resume_progress_total`]
+//!
+//! # Examples
+//!
+//! Header helpers (no network):
+//!
+//! ```
+//! use fetchling_http::{
+//!     parse_content_disposition_filename, parse_content_range_total, resume_progress_total,
+//! };
+//!
+//! assert_eq!(
+//!     parse_content_disposition_filename(r#"attachment; filename="report.pdf""#)
+//!         .as_deref(),
+//!     Some("report.pdf")
+//! );
+//! assert_eq!(parse_content_range_total("bytes 0-499/1234"), Some(1234));
+//! assert_eq!(
+//!     resume_progress_total(100, Some(50), Some("bytes 100-149/500")),
+//!     Some(500)
+//! );
+//! ```
+//!
+//! Construct a client from default config (no network):
+//!
+//! ```
+//! use fetchling_core::{Config, Logger};
+//! use fetchling_http::HttpClient;
+//!
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let log = Logger::new(&cfg).unwrap();
+//! let client = HttpClient::new(&cfg, log).unwrap();
+//! let _ = client;
+//! ```
+//!
+//! Download a file (does not run; needs a server):
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use fetchling_core::{Config, Logger};
+//! use fetchling_http::HttpClient;
+//! use url::Url;
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let log = Logger::new(&cfg).unwrap();
+//! let client = HttpClient::new(&cfg, log).unwrap();
+//! let url = Url::parse("https://example.com/file.bin").unwrap();
+//! let _ = client
+//!     .download(&cfg, &url, Path::new("file.bin"))
+//!     .await
+//!     .unwrap();
+//! # }
+//! ```
+
+#![warn(missing_docs)]
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Write};
@@ -116,6 +209,11 @@ impl IdlePool {
     }
 }
 
+/// HTTP/1.1 retriever.
+///
+/// Resolves and connects through `fetchling-net` (DNS, TLS, proxies), reuses
+/// keep-alive connections, stores cookies in a [`Jar`], applies HSTS, and
+/// writes progress through [`Logger`].
 pub struct HttpClient {
     dns: DnsCache,
     tls: TlsConnector,
@@ -126,6 +224,17 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
+    /// Build a client from `cfg` and `log`.
+    ///
+    /// Loads cookies from [`Config::load_cookies`] when [`Config::cookies`] is
+    /// set, loads HSTS from [`Config::hsts_file`] when [`Config::hsts`] is set,
+    /// and builds a rustls connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] or [`Error::Parse`] when the cookie file cannot be
+    /// read or parsed, and [`Error::Tls`] or [`Error::Io`] when the TLS
+    /// connector cannot be built.
     pub fn new(cfg: &Config, log: Logger) -> Result<Self> {
         let mut jar = Jar::new();
         if cfg.cookies {
@@ -156,6 +265,14 @@ impl HttpClient {
         })
     }
 
+    /// Persist the cookie jar to `path`.
+    ///
+    /// Session cookies are written only when `keep_session` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the file cannot be written, or
+    /// [`Error::Message`] if the jar lock is poisoned.
     pub fn save_cookies(&self, path: &Path, keep_session: bool) -> Result<()> {
         let jar = self
             .jar
@@ -164,6 +281,12 @@ impl HttpClient {
         jar.save(path, keep_session)
     }
 
+    /// Persist the HSTS store to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the file cannot be written, or
+    /// [`Error::Message`] if the HSTS lock is poisoned.
     pub fn save_hsts(&self, path: &str) -> Result<()> {
         let store = self
             .hsts
@@ -172,6 +295,24 @@ impl HttpClient {
         store.save(path)
     }
 
+    /// Retrieve `url` into `dest`.
+    ///
+    /// Accepts `http` and `https` URLs only. When HSTS is enabled, an `http`
+    /// URL may be upgraded before the first hop. Follows redirects up to
+    /// [`Config::max_redirect`], reuses keep-alive connections, pins Basic
+    /// auth to the initial origin, sends `Range` when resuming, decodes gzip
+    /// when advertised, and optionally tees WARC request/response bytes onto
+    /// the returned [`FetchMeta`]. `dest` of `-` writes the body to stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] for a non-HTTP scheme, HTTPS-only refusal,
+    /// too many redirects, or gzip / Content-Length failures;
+    /// [`Error::Server`] for 4xx/5xx unless [`Config::content_on_error`];
+    /// [`Error::Network`] on connect, handshake, or body I/O;
+    /// [`Error::Tls`] on TLS handshake failure; [`Error::Parse`] for a missing
+    /// host/port or a bad redirect; [`Error::Io`] when `dest` cannot be
+    /// created or written; [`Error::Message`] if a lock is poisoned.
     pub async fn download(&self, cfg: &Config, url: &Url, dest: &Path) -> Result<FetchMeta> {
         let mut current = url.clone();
         if cfg.hsts && current.scheme() == "http" {
@@ -819,17 +960,31 @@ impl HttpClient {
     }
 }
 
+/// Per-response metadata after a hop.
+///
+/// Redirect hops return with [`Self::redirect_to`] set; [`HttpClient::download`]
+/// follows until the final response.
 #[derive(Debug)]
 pub struct FetchMeta {
+    /// HTTP status code.
     pub status: u16,
+    /// `Location` target when this hop is a redirect.
     pub redirect_to: Option<String>,
+    /// `Content-Type` header, if present.
     pub content_type: Option<String>,
+    /// Basename from `Content-Disposition`, if present.
     pub content_disposition_filename: Option<String>,
+    /// Bytes written to `dest` (or stdout).
     pub bytes_written: u64,
+    /// URL after this hop (redirects update it on the next fetch).
     pub final_url: Url,
+    /// Raw HTTP request bytes for a WARC writer (not a `.warc` file).
     pub warc_request: Option<Vec<u8>>,
+    /// Raw HTTP response bytes for a WARC writer (not a `.warc` file).
     pub warc_response: Option<Vec<u8>>,
+    /// `Link` header values from this response.
     pub link_headers: Vec<String>,
+    /// Peer address of the TCP connection, if known.
     pub peer_ip: Option<IpAddr>,
 }
 
@@ -995,6 +1150,27 @@ fn format_request_bytes(
 }
 
 /// Extract a basename from Content-Disposition (`filename` / `filename*`).
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_http::parse_content_disposition_filename;
+///
+/// assert_eq!(
+///     parse_content_disposition_filename(r#"attachment; filename="report.pdf""#)
+///         .as_deref(),
+///     Some("report.pdf")
+/// );
+/// assert_eq!(
+///     parse_content_disposition_filename(r#"inline; filename=foo.txt"#).as_deref(),
+///     Some("foo.txt")
+/// );
+/// assert_eq!(
+///     parse_content_disposition_filename(r#"attachment; filename*=UTF-8''hello%20world.bin"#)
+///         .as_deref(),
+///     Some("hello world.bin")
+/// );
+/// ```
 pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
     let mut filename = None;
     for part in header.split(';') {
@@ -1356,6 +1532,15 @@ fn content_length_mismatch(expected: u64, written: u64, gzip: bool) -> Option<St
 }
 
 /// Parse `Content-Range: bytes start-end/total` and return `total` when finite.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_http::parse_content_range_total;
+///
+/// assert_eq!(parse_content_range_total("bytes 0-499/1234"), Some(1234));
+/// assert_eq!(parse_content_range_total("bytes 0-499/*"), None);
+/// ```
 pub fn parse_content_range_total(header: &str) -> Option<u64> {
     let s = header.trim();
     let rest = s.strip_prefix("bytes ")?.trim();
@@ -1367,6 +1552,18 @@ pub fn parse_content_range_total(header: &str) -> Option<u64> {
 }
 
 /// Full entity size for resume progress: Content-Range total, else start + Content-Length.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_http::resume_progress_total;
+///
+/// assert_eq!(
+///     resume_progress_total(100, Some(50), Some("bytes 100-149/500")),
+///     Some(500)
+/// );
+/// assert_eq!(resume_progress_total(100, Some(50), None), Some(150));
+/// ```
 pub fn resume_progress_total(
     start_pos: u64,
     content_length: Option<u64>,
@@ -1383,6 +1580,96 @@ pub fn resume_progress_total(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    struct HttpReply {
+        status: u16,
+        reason: &'static str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    fn http_reply(
+        status: u16,
+        reason: &'static str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> HttpReply {
+        HttpReply {
+            status,
+            reason,
+            headers: headers
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            body: body.to_vec(),
+        }
+    }
+
+    async fn spawn_http(replies: Vec<HttpReply>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            for reply in replies {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = match stream.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                log2.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into_owned());
+                let mut out = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    reply.status,
+                    reply.reason,
+                    reply.body.len()
+                );
+                for (k, v) in &reply.headers {
+                    out.push_str(&format!("{k}: {v}\r\n"));
+                }
+                out.push_str("\r\n");
+                let mut bytes = out.into_bytes();
+                bytes.extend_from_slice(&reply.body);
+                let _ = stream.write_all(&bytes).await;
+            }
+        });
+        (addr, log)
+    }
+
+    fn quiet_cfg() -> Config {
+        Config {
+            quiet: true,
+            netrc: false,
+            http_keep_alive: false,
+            ..Config::default()
+        }
+    }
+
+    fn test_client(cfg: &Config) -> HttpClient {
+        let log = Logger::new(cfg).unwrap();
+        HttpClient::new(cfg, log).unwrap()
+    }
+
+    fn temp_dest(suffix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("fetchling-http-{suffix}-{}", std::process::id()))
+    }
 
     #[test]
     fn content_length_mismatch_skips_gzip_and_exact() {
@@ -1485,5 +1772,311 @@ mod tests {
                 .as_deref(),
             Some("passwd")
         );
+    }
+
+    #[test]
+    fn idle_pool_with_limits_clamps_zero() {
+        let mut pool = IdlePool::with_limits(0, 0);
+        assert_eq!(pool.max_idle_per_key, 1);
+        assert_eq!(pool.max_idle_total, 1);
+        let key = PoolKey {
+            scheme: "http".into(),
+            host: "example.com".into(),
+            port: 80,
+            proxy: String::new(),
+        };
+        assert_eq!(pool.idle_for(&key), 0);
+        assert!(pool.take(&key).is_none());
+    }
+
+    #[test]
+    fn parse_content_disposition_filename_edges() {
+        assert!(parse_content_disposition_filename(r#"attachment; filename="""#).is_none());
+        assert!(parse_content_disposition_filename(r#"attachment; filename=".""#).is_none());
+        assert!(parse_content_disposition_filename(r#"attachment; filename="..""#).is_none());
+        assert_eq!(
+            parse_content_disposition_filename(r#"attachment; filename="dir\file.bin""#).as_deref(),
+            Some("file.bin")
+        );
+        assert_eq!(
+            parse_content_disposition_filename(
+                r#"attachment; filename="plain.txt"; filename*=UTF-8''star.bin"#
+            )
+            .as_deref(),
+            Some("star.bin")
+        );
+    }
+
+    #[test]
+    fn parse_content_range_total_whitespace() {
+        assert_eq!(
+            parse_content_range_total("  bytes 0-499/1234  "),
+            Some(1234)
+        );
+        assert_eq!(parse_content_range_total("0-499/1234"), None);
+        assert_eq!(parse_content_range_total("bytes0-499/1234"), None);
+    }
+
+    #[test]
+    fn load_body_precedence() {
+        assert!(load_body(&Config::default()).unwrap().is_empty());
+        let body_path = temp_dest("body-file");
+        let post_path = temp_dest("post-file");
+        std::fs::write(&body_path, b"from-body-file").unwrap();
+        std::fs::write(&post_path, b"from-post-file").unwrap();
+        let cfg = Config {
+            body_data: Some("from-data".into()),
+            body_file: Some(body_path.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        assert_eq!(load_body(&cfg).unwrap(), b"from-data");
+        let cfg = Config {
+            body_file: Some(body_path.to_string_lossy().into_owned()),
+            post_data: Some("from-post".into()),
+            ..Config::default()
+        };
+        assert_eq!(load_body(&cfg).unwrap(), b"from-body-file");
+        let cfg = Config {
+            post_data: Some("from-post".into()),
+            post_file: Some(post_path.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        assert_eq!(load_body(&cfg).unwrap(), b"from-post");
+        let cfg = Config {
+            post_file: Some(post_path.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        assert_eq!(load_body(&cfg).unwrap(), b"from-post-file");
+        let _ = std::fs::remove_file(&body_path);
+        let _ = std::fs::remove_file(&post_path);
+    }
+
+    #[test]
+    fn format_request_bytes_includes_method_headers_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("example.com"));
+        let bytes = format_request_bytes(&Method::POST, "/foo", &headers, b"xyz");
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.starts_with("POST /foo HTTP/1.1\r\n"));
+        assert!(s.contains("host: example.com\r\n"));
+        assert!(s.ends_with("\r\n\r\nxyz"));
+    }
+
+    #[test]
+    fn auth_origin_pins_and_maybe_auth() {
+        let cfg = Config {
+            quiet: true,
+            netrc: false,
+            http_user: Some("u".into()),
+            http_password: Some("p".into()),
+            ..Config::default()
+        };
+        let url = Url::parse("http://example.com/a").unwrap();
+        let origin = AuthOrigin::from_url(&cfg, &url);
+        assert!(origin.matches(&url));
+        assert!(origin.matches(&Url::parse("http://example.com:80/a").unwrap()));
+        assert!(!origin.matches(&Url::parse("http://other.com/a").unwrap()));
+        assert!(!origin.matches(&Url::parse("https://example.com/a").unwrap()));
+        assert!(!origin.matches(&Url::parse("http://example.com:8080/a").unwrap()));
+        let mut headers = HeaderMap::new();
+        maybe_auth(&cfg, &url, &origin, &mut headers);
+        let val = headers.get(AUTHORIZATION).unwrap().to_str().unwrap();
+        assert!(val.starts_with("Basic "));
+        let mut headers = HeaderMap::new();
+        maybe_auth(
+            &cfg,
+            &Url::parse("http://other.com/a").unwrap(),
+            &origin,
+            &mut headers,
+        );
+        assert!(!headers.contains_key(AUTHORIZATION));
+        let cfg_no_pass = Config {
+            quiet: true,
+            netrc: false,
+            http_user: Some("u".into()),
+            http_password: None,
+            auth_no_challenge: false,
+            ..Config::default()
+        };
+        let origin = AuthOrigin::from_url(&cfg_no_pass, &url);
+        let mut headers = HeaderMap::new();
+        maybe_auth(&cfg_no_pass, &url, &origin, &mut headers);
+        assert!(!headers.contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn set_local_mtime_noop_for_stdout_and_missing() {
+        let target = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        set_local_mtime(Path::new("-"), target).unwrap();
+        let missing = temp_dest("mtime-missing");
+        let _ = std::fs::remove_file(&missing);
+        set_local_mtime(&missing, target).unwrap();
+    }
+
+    #[test]
+    fn warc_tee_memory_roundtrip() {
+        let mut tee = WarcTee::new(None).unwrap();
+        tee.push(b"abc");
+        tee.push(b"def");
+        assert_eq!(tee.finish().as_deref(), Some(b"abcdef".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn download_rejects_non_http_scheme() {
+        let cfg = quiet_cfg();
+        let client = test_client(&cfg);
+        let url = Url::parse("ftp://example.com/file.bin").unwrap();
+        let err = client
+            .download(&cfg, &url, Path::new("unused.bin"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn download_https_only_refuses_http() {
+        let cfg = Config {
+            https_only: true,
+            ..quiet_cfg()
+        };
+        let client = test_client(&cfg);
+        let url = Url::parse("http://127.0.0.1/file.bin").unwrap();
+        let err = client
+            .download(&cfg, &url, Path::new("unused.bin"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+        assert!(err.to_string().contains("HTTPS-only"));
+    }
+
+    #[tokio::test]
+    async fn download_body_via_localhost() {
+        let (addr, _) = spawn_http(vec![http_reply(200, "OK", &[], b"hello-http")]).await;
+        let dest = temp_dest("body");
+        let _ = std::fs::remove_file(&dest);
+        let cfg = quiet_cfg();
+        let url = Url::parse(&format!("http://127.0.0.1:{}/file.bin", addr.port())).unwrap();
+        let meta = test_client(&cfg).download(&cfg, &url, &dest).await.unwrap();
+        assert_eq!(meta.status, 200);
+        assert_eq!(meta.bytes_written, 10);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello-http");
+        assert_eq!(meta.peer_ip, Some(IpAddr::from([127, 0, 0, 1])));
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_follows_relative_redirect() {
+        let (addr, _) = spawn_http(vec![
+            http_reply(302, "Found", &[("Location", "/final")], b""),
+            http_reply(200, "OK", &[], b"final-body"),
+        ])
+        .await;
+        let dest = temp_dest("redir");
+        let _ = std::fs::remove_file(&dest);
+        let cfg = quiet_cfg();
+        let url = Url::parse(&format!("http://127.0.0.1:{}/start", addr.port())).unwrap();
+        let meta = test_client(&cfg).download(&cfg, &url, &dest).await.unwrap();
+        assert_eq!(meta.status, 200);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"final-body");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_too_many_redirects() {
+        let (addr, _) = spawn_http(vec![http_reply(
+            302,
+            "Found",
+            &[("Location", "/next")],
+            b"",
+        )])
+        .await;
+        let dest = temp_dest("maxredir");
+        let _ = std::fs::remove_file(&dest);
+        let cfg = Config {
+            max_redirect: 0,
+            ..quiet_cfg()
+        };
+        let url = Url::parse(&format!("http://127.0.0.1:{}/start", addr.port())).unwrap();
+        let err = test_client(&cfg)
+            .download(&cfg, &url, &dest)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+        assert!(err.to_string().contains("too many redirections"));
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_server_error_and_content_on_error() {
+        let (addr, _) = spawn_http(vec![http_reply(404, "Not Found", &[], b"nope")]).await;
+        let dest = temp_dest("err404");
+        let _ = std::fs::remove_file(&dest);
+        let cfg = quiet_cfg();
+        let url = Url::parse(&format!("http://127.0.0.1:{}/missing", addr.port())).unwrap();
+        let err = test_client(&cfg)
+            .download(&cfg, &url, &dest)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Server(_)));
+
+        let (addr, _) = spawn_http(vec![http_reply(404, "Not Found", &[], b"err-body")]).await;
+        let cfg = Config {
+            content_on_error: true,
+            ..quiet_cfg()
+        };
+        let url = Url::parse(&format!("http://127.0.0.1:{}/missing", addr.port())).unwrap();
+        let meta = test_client(&cfg).download(&cfg, &url, &dest).await.unwrap();
+        assert_eq!(meta.status, 404);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"err-body");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_gzip_decodes_body() {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"hello-gzip").unwrap();
+        let gz = enc.finish().unwrap();
+        let (addr, _) = spawn_http(vec![http_reply(
+            200,
+            "OK",
+            &[("Content-Encoding", "gzip")],
+            &gz,
+        )])
+        .await;
+        let dest = temp_dest("gzip");
+        let _ = std::fs::remove_file(&dest);
+        let cfg = quiet_cfg();
+        let url = Url::parse(&format!("http://127.0.0.1:{}/gz.bin", addr.port())).unwrap();
+        let meta = test_client(&cfg).download(&cfg, &url, &dest).await.unwrap();
+        assert_eq!(meta.status, 200);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello-gzip");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_stores_and_sends_cookies() {
+        let (addr, reqs) = spawn_http(vec![
+            http_reply(200, "OK", &[("Set-Cookie", "id=abc; Path=/")], b"first"),
+            http_reply(200, "OK", &[], b"second"),
+        ])
+        .await;
+        let dest1 = temp_dest("cookie1");
+        let dest2 = temp_dest("cookie2");
+        let _ = std::fs::remove_file(&dest1);
+        let _ = std::fs::remove_file(&dest2);
+        let cfg = Config {
+            cookies: true,
+            ..quiet_cfg()
+        };
+        let client = test_client(&cfg);
+        let url1 = Url::parse(&format!("http://127.0.0.1:{}/a", addr.port())).unwrap();
+        let url2 = Url::parse(&format!("http://127.0.0.1:{}/b", addr.port())).unwrap();
+        client.download(&cfg, &url1, &dest1).await.unwrap();
+        client.download(&cfg, &url2, &dest2).await.unwrap();
+        let second = reqs.lock().unwrap()[1].clone();
+        assert!(second.to_ascii_lowercase().contains("cookie:"));
+        assert!(second.contains("id=abc"));
+        let _ = std::fs::remove_file(&dest1);
+        let _ = std::fs::remove_file(&dest2);
     }
 }

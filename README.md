@@ -1,6 +1,7 @@
 # fetchling
 
 [![CI](https://github.com/xychelsea/fetchling/actions/workflows/ci.yml/badge.svg)](https://github.com/xychelsea/fetchling/actions/workflows/ci.yml)
+[![docs.rs](https://docs.rs/fetchling/badge.svg)](https://docs.rs/fetchling)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 `fetchling` is a modular, non-interactive network retriever written in Rust for downloading files and recursively mirroring remote content from the command line.
@@ -80,14 +81,14 @@ cargo install --path crates/fetchling
 cargo install --git https://github.com/xychelsea/fetchling fetchling
 ```
 
-crates.io publishing is not available yet; use GitHub Releases or install from source as above.
+`fetchling` is published to [crates.io](https://crates.io/crates/fetchling).
 
 ### NixOS
 
 A development build can also be produced with a temporary Nix shell (my environment):
 
 ```console
-nix-shell -p cargo rustc -I nixpkgs=channel:nixos-unstable \
+nix-shell -p cargo cargo-deny clippy rustc -I nixpkgs=channel:nixos-unstable \
   --run 'cargo build --release -p fetchling'
 ```
 
@@ -631,14 +632,26 @@ Fetchling is organized as a `cargo` workspace with eight crates:
 
 | Crate | Responsibility |
 | --- | --- |
-| `fetchling` | Executable entry point |
-| `fetchling-cli` | Command-line metadata, parsing, help, and option handling |
-| `fetchling-core` | Shared configuration, errors, logging, progress, and URL utilities |
-| `fetchling-net` | DNS, TCP, TLS, connection behavior, and rate limiting |
-| `fetchling-http` | HTTP/HTTPS client behavior, cookies, redirects, and connection reuse |
-| `fetchling-ftp` | FTP protocol handling |
-| `fetchling-formats` | HTML/CSS extraction, `robots.txt`, Metalink, WARC, and link conversion |
-| `fetchling-engine` | Retrieval scheduling, recursive traversal, concurrency, and orchestration |
+| [`fetchling`](https://docs.rs/fetchling) | Executable entry point: argv, rustls, daemonize, Tokio, and engine |
+| [`fetchling-cli`](https://docs.rs/fetchling-cli) | Command-line metadata, parsing, help, and option handling |
+| [`fetchling-core`](https://docs.rs/fetchling-core) | Shared configuration, errors, logging, progress, and URL utilities |
+| [`fetchling-net`](https://docs.rs/fetchling-net) | DNS, TCP, TLS, HTTP-proxy, and rate-limiting primitives |
+| [`fetchling-http`](https://docs.rs/fetchling-http) | HTTP/1.1 retrieval with TLS, keep-alive pooling, cookies, and redirects |
+| [`fetchling-ftp`](https://docs.rs/fetchling-ftp) | FTP/FTPS retrieval, listing, and glob expansion |
+| [`fetchling-formats`](https://docs.rs/fetchling-formats) | Metalink, WARC, robots.txt, and HTML/CSS/feed link extraction |
+| [`fetchling-engine`](https://docs.rs/fetchling-engine) | Recursive HTTP/FTP retrieval orchestration with robots, metalink, and path policy |
+
+### Library crates
+
+The `fetchling` crate is the command-line binary (and a thin `run` / `run_with_args` wrapper). Protocol and orchestration crates are documented for independent use: depend on them directly, set `Config` fields in library code, and do not expect them to re-export `Config` or `Error`.
+
+- [`fetchling-cli`](https://docs.rs/fetchling-cli) — argv parsing into `Config`
+- [`fetchling-core`](https://docs.rs/fetchling-core) — `Config`, errors, logging, progress, URLs
+- [`fetchling-net`](https://docs.rs/fetchling-net) — DNS, TCP, TLS, proxies, rate limits
+- [`fetchling-http`](https://docs.rs/fetchling-http) — HTTP/1.1 client
+- [`fetchling-ftp`](https://docs.rs/fetchling-ftp) — FTP/FTPS client
+- [`fetchling-formats`](https://docs.rs/fetchling-formats) — Metalink, WARC, robots, link extraction
+- [`fetchling-engine`](https://docs.rs/fetchling-engine) — recursive retrieval job runner
 
 The engine owns the retrieval queue and shared crawl state. Independent jobs are run through Tokio tasks subject to a global semaphore controlled by `--max-threads`. A separate per-host semaphore (`--max-threads-per-host`, default `min(max-threads, 4)`) limits simultaneous retrievals from a single host. The engine also keeps shared state for:
 
@@ -730,6 +743,14 @@ Run Clippy with warnings treated as errors:
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Docs
+
+Build workspace rustdoc with missing-docs warnings treated as errors:
+
+```console
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+```
+
 ### Test
 
 Run all workspace tests:
@@ -794,14 +815,14 @@ For compatibility changes, include tests for the specific retrieval behavior rat
 
 ## Project status
 
-`fetchling` **0.1.1** is an experimental public release. The advertised [Features](#features) surface is covered by localhost behavior tests and a short CI `wget` comparison; remaining gaps are tracked under [Feature status](#feature-status).
+`fetchling` **0.1.2** is an experimental public release. The advertised [Features](#features) surface is covered by localhost behavior tests and a short CI `wget` comparison; remaining gaps are tracked under [Feature status](#feature-status).
 
 Release gate for this version:
 
 - behavior matrix + `scripts/wget-compare.sh` green in CI
 - accepted-but-inert options warn or reject clearly (`robots=` wgetrc, `ftp_proxy`, deferred flags)
 
-Post-`0.1.1` priorities remain reliability and selective parity work (not full wget2 coverage):
+Post-`0.1.2` priorities remain reliability and selective parity work (not full wget2 coverage):
 
 - proxy transport (SOCKS / FTP proxy)
 - HTTP auth challenges (Digest / NTLM)

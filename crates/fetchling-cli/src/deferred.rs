@@ -1,5 +1,6 @@
 //! Options that fetchling rejects until implemented.
 
+/// Whether `name` is an unimplemented long option, with or without a `no-` prefix.
 pub fn is_deferred_option(name: &str) -> bool {
     let name = name.strip_prefix("no-").unwrap_or(name);
     DEFERRED.binary_search(&name).is_ok()
@@ -82,5 +83,8 @@ mod tests {
         assert!(!is_deferred_option("http-proxy"));
         assert!(!is_deferred_option("force-metalink"));
         assert!(!is_deferred_option("cut-url-get-vars"));
+        assert!(is_deferred_option("ocsp"));
+        assert!(is_deferred_option("no-ocsp"));
+        assert!(!is_deferred_option("recursive"));
     }
 }

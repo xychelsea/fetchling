@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "fetchling-net for fetchling"
+readme = "README.md"
+description = "DNS, TCP, TLS, HTTP-proxy, and rate-limiting primitives for building a network retriever"
+keywords = ["dns", "tls", "proxy", "download", "fetchling"]
+categories = ["network-programming"]
 
 [dependencies]
 fetchling-core = { workspace = true }

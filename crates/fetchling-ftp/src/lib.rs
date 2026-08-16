@@ -1,3 +1,102 @@
+//! FTP/FTPS retrieval, listing, and glob expansion primitives for a retriever.
+//!
+//! # What this crate is (and is not)
+//!
+//! IS: an FTP/FTPS client ([`FtpClient`]) that downloads files, writes
+//! directory listings, and expands globs. Listing parsers ([`parse_mlsd`],
+//! [`parse_unix_list`], [`parse_unix_mode_from_list_line`]) and listing types
+//! ([`FtpEntry`], [`FtpEntryKind`], [`FtpDownloadOutcome`]). The public API is
+//! flat at the crate root. Drive behavior with [`Config`] fields set directly;
+//! CLI / wget names in those field docs are compatibility aliases. Async entry
+//! points need a Tokio runtime. Transport and TLS come from `fetchling-net` via
+//! [`FtpClient::dns`].
+//!
+//! IS NOT: HTTP, connection pooling, recursive mirroring, symlink enqueue
+//! policy, or SOCKS/HTTP proxies. Recursion and `.listing` destination naming
+//! live in `fetchling-engine` or the caller. This crate does not re-export
+//! [`Config`] or [`Error`].
+//!
+//! # Typical integration
+//!
+//! 1. Start from [`Config::default`] and set FTP/FTPS fields (`ftp_user` /
+//!    `ftp_password`, `passive_ftp`, `ftps_*`, `continue_download`,
+//!    `preserve_permissions`)
+//! 2. Create [`FtpClient::default`] (optionally reuse or replace
+//!    [`FtpClient::dns`])
+//! 3. Call [`FtpClient::download`] for a file or a directory URL (path ending
+//!    in `/`)
+//! 4. Call [`FtpClient::expand_glob`] when the last path segment contains `*`,
+//!    `?`, or `[…]`
+//! 5. Optionally parse listing text with [`parse_mlsd`] / [`parse_unix_list`]
+//!
+//! # Areas
+//!
+//! - **Client** — [`FtpClient`]
+//! - **Outcomes** — [`FtpDownloadOutcome`], [`FtpEntry`], [`FtpEntryKind`]
+//! - **Parsers** — [`parse_mlsd`], [`parse_unix_list`],
+//!   [`parse_unix_mode_from_list_line`]
+//!
+//! # Examples
+//!
+//! Parse `MLSD` / Unix `LIST` text (no network):
+//!
+//! ```
+//! use fetchling_ftp::{
+//!     parse_mlsd, parse_unix_list, parse_unix_mode_from_list_line, FtpEntryKind,
+//! };
+//!
+//! let entries = parse_mlsd("type=file;size=1; readme.txt\ntype=dir; docs\n");
+//! assert_eq!(entries[0].name, "readme.txt");
+//! assert_eq!(entries[0].kind, FtpEntryKind::File);
+//!
+//! let entries = parse_unix_list(
+//!     "-rw-r--r-- 1 user group 123 Jan  1 12:00 readme.txt\n\
+//!      drwxr-xr-x 2 user group 4096 Jan  1 12:00 docs\n",
+//! );
+//! assert_eq!(entries[1].kind, FtpEntryKind::Dir);
+//!
+//! assert_eq!(
+//!     parse_unix_mode_from_list_line(
+//!         "-rw-r--r-- 1 user group 123 Jan  1 12:00 readme.txt"
+//!     ),
+//!     Some(0o644)
+//! );
+//! ```
+//!
+//! Construct a client from default config (no network):
+//!
+//! ```
+//! use fetchling_core::Config;
+//! use fetchling_ftp::FtpClient;
+//!
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let client = FtpClient::default();
+//! let _ = (cfg, client);
+//! ```
+//!
+//! Download a file and expand a glob (does not run; needs a server):
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use fetchling_core::Config;
+//! use fetchling_ftp::FtpClient;
+//! use url::Url;
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let client = FtpClient::default();
+//! let url = Url::parse("ftp://ftp.example.com/pub/file.bin").unwrap();
+//! let _ = client.download(&cfg, &url, Path::new("file.bin")).await.unwrap();
+//! let glob = Url::parse("ftp://ftp.example.com/pub/*.bin").unwrap();
+//! let _ = client.expand_glob(&cfg, &glob).await.unwrap();
+//! # }
+//! ```
+
+#![warn(missing_docs)]
+
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
@@ -18,27 +117,59 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use url::Url;
 
+/// Kind of a directory listing entry.
+///
+/// Parsers drop `.`, `..`, and names containing path separators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FtpEntryKind {
+    /// Regular file.
     File,
+    /// Directory.
     Dir,
-    Symlink { target: Option<String> },
+    /// Symbolic link; `target` is set when the listing includes it.
+    Symlink {
+        /// Link target path, if the listing provided one.
+        target: Option<String>,
+    },
+    /// Unrecognized or untyped entry.
     Other,
 }
 
+/// A single name from an FTP directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtpEntry {
+    /// Sanitized basename.
     pub name: String,
+    /// File, directory, symlink, or other.
     pub kind: FtpEntryKind,
 }
 
+/// Result of [`FtpClient::download`].
+///
+/// `bytes` is the number of bytes written to `dest`. For listings, `entries`
+/// is empty when only `NLST` succeeded (names were not parsed).
 #[derive(Debug, Clone)]
 pub enum FtpDownloadOutcome {
-    File { bytes: u64 },
-    Listing { bytes: u64, entries: Vec<FtpEntry> },
+    /// A file was retrieved with `RETR`.
+    File {
+        /// Bytes written to `dest` (not including a prior resume offset).
+        bytes: u64,
+    },
+    /// A directory listing was written to `dest`.
+    Listing {
+        /// Bytes written to `dest`.
+        bytes: u64,
+        /// Parsed entries from `MLSD` or Unix `LIST`.
+        entries: Vec<FtpEntry>,
+    },
 }
 
+/// FTP/FTPS session client.
+///
+/// Owns a [`DnsCache`] used for control and data connections. Replace or reuse
+/// [`Self::dns`] across clients if desired.
 pub struct FtpClient {
+    /// DNS cache shared with `fetchling-net` connect helpers.
     pub dns: DnsCache,
 }
 
@@ -145,6 +276,28 @@ fn auth_tls_accepted(reply: &str) -> bool {
 }
 
 impl FtpClient {
+    /// Retrieve `url` into `dest`.
+    ///
+    /// Accepts `ftp` and `ftps` URLs only. A path ending in `/` lists the
+    /// directory (`MLSD`, then `LIST`, then `NLST`) and writes the raw listing
+    /// to `dest`. Otherwise the transfer uses `TYPE I` and `RETR`. Resume uses
+    /// `REST` when `start_pos` is set or `continue_download` sees an existing
+    /// `dest`. Data connections are passive `PASV` or active `PORT`/`EPRT`
+    /// according to `passive_ftp`.
+    ///
+    /// FTPS uses explicit `AUTH TLS` unless `ftps_implicit` is set (port 990
+    /// when the URL port is unset or 21). Data is `PROT P` unless
+    /// `ftps_clear_data_connection`. `ftps_fallback_to_ftp` continues as plain
+    /// FTP if `AUTH TLS` is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] for a non-FTP scheme, command injection in
+    /// the path, or REST/PORT/PASV failures; [`Error::Server`] when `RETR` or
+    /// listing commands fail; [`Error::Auth`] on login failure; [`Error::Tls`]
+    /// on handshake or `AUTH TLS` failure; [`Error::Network`] on connect/I/O
+    /// timeouts; [`Error::Parse`] when the URL has no host; [`Error::Io`] when
+    /// `dest` cannot be created or written.
     pub async fn download(
         &self,
         cfg: &Config,
@@ -265,6 +418,18 @@ impl FtpClient {
         Ok(FtpDownloadOutcome::File { bytes: written })
     }
 
+    /// Expand the last path segment of `url` as a glob.
+    ///
+    /// Lists the parent directory with `NLST` (then `LIST`) and returns sorted,
+    /// unique basenames that match via [`match_glob`], honoring `ignore_case`.
+    /// An empty match is [`Error::Server`].
+    ///
+    /// # Errors
+    ///
+    /// Same categories as [`Self::download`]: [`Error::Protocol`] for a
+    /// non-FTP scheme or injection, [`Error::Server`] when listing fails or
+    /// matches nothing, plus [`Error::Auth`], [`Error::Tls`],
+    /// [`Error::Network`], [`Error::Parse`], and [`Error::Io`].
     pub async fn expand_glob(&self, cfg: &Config, url: &Url) -> Result<Vec<String>> {
         if url.scheme() != "ftp" && url.scheme() != "ftps" {
             return Err(Error::Protocol(format!("not an FTP URL: {}", url.scheme())));
@@ -621,6 +786,22 @@ fn sanitize_entry_name(name: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Parse RFC 3659 `MLSD` facts into [`FtpEntry`] values.
+///
+/// Recognizes `type=` (`file`, `dir`/`cdir`/`pdir`, symlink) and
+/// `unix.slink` / `unix.symlink`. `.`, `..`, and names with path separators
+/// are skipped.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_ftp::{parse_mlsd, FtpEntryKind};
+///
+/// let entries = parse_mlsd("type=file;size=1; readme.txt\ntype=dir; docs\n");
+/// assert_eq!(entries[0].name, "readme.txt");
+/// assert_eq!(entries[0].kind, FtpEntryKind::File);
+/// assert_eq!(entries[1].kind, FtpEntryKind::Dir);
+/// ```
 pub fn parse_mlsd(text: &str) -> Vec<FtpEntry> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -674,6 +855,24 @@ pub fn parse_mlsd(text: &str) -> Vec<FtpEntry> {
     out
 }
 
+/// Parse a Unix `LIST` listing into [`FtpEntry`] values.
+///
+/// Lines must start with `-`, `d`, or `l`. Symlink targets after ` -> ` are
+/// recorded when present. `.`, `..`, and names with path separators are
+/// skipped.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_ftp::{parse_unix_list, FtpEntryKind};
+///
+/// let entries = parse_unix_list(
+///     "-rw-r--r-- 1 user group 123 Jan  1 12:00 readme.txt\n\
+///      drwxr-xr-x 2 user group 4096 Jan  1 12:00 docs\n",
+/// );
+/// assert_eq!(entries[0].kind, FtpEntryKind::File);
+/// assert_eq!(entries[1].kind, FtpEntryKind::Dir);
+/// ```
 pub fn parse_unix_list(text: &str) -> Vec<FtpEntry> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -883,6 +1082,23 @@ fn unix_mode_for_basename(list_text: &str, basename: &str) -> Option<u32> {
     None
 }
 
+/// Parse Unix permission bits from a `LIST` line (`-rw-r--r--`, …).
+///
+/// Includes setuid, setgid, and sticky bits. Returns `None` when the line is
+/// not a Unix `LIST` permission field.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_ftp::parse_unix_mode_from_list_line;
+///
+/// assert_eq!(
+///     parse_unix_mode_from_list_line(
+///         "-rw-r--r-- 1 user group 123 Jan  1 12:00 readme.txt"
+///     ),
+///     Some(0o644)
+/// );
+/// ```
 pub fn parse_unix_mode_from_list_line(line: &str) -> Option<u32> {
     let line = line.trim();
     let bytes = line.as_bytes();
@@ -1113,11 +1329,112 @@ fn parse_pasv(reply: &str) -> Result<SocketAddr> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use tokio::net::TcpListener;
+
+    enum PasvPayload {
+        Retr(&'static [u8]),
+        Mlsd(&'static [u8]),
+        Nlst(&'static [u8]),
+    }
+
+    async fn spawn_pasv_ftp(payload: PasvPayload) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut control, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = control.write_all(b"220 fetchling test FTP\r\n").await;
+            let mut data_listener: Option<TcpListener> = None;
+            let mut buf = Vec::new();
+            loop {
+                let mut tmp = [0u8; 1024];
+                let n = match control.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&tmp[..n]);
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&buf[..=pos]).into_owned();
+                    buf.drain(..=pos);
+                    let cmd = line.trim_end_matches(['\r', '\n']);
+                    let upper = cmd.to_ascii_uppercase();
+                    if upper.starts_with("USER ") {
+                        let _ = control.write_all(b"331 Password required\r\n").await;
+                    } else if upper.starts_with("PASS ") {
+                        let _ = control.write_all(b"230 Login ok\r\n").await;
+                    } else if upper.starts_with("TYPE ") {
+                        let _ = control.write_all(b"200 Type set\r\n").await;
+                    } else if upper == "PASV" {
+                        let dl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let daddr = dl.local_addr().unwrap();
+                        let port = daddr.port();
+                        let p1 = port / 256;
+                        let p2 = port % 256;
+                        let reply = format!("227 Entering Passive Mode (127,0,0,1,{p1},{p2})\r\n");
+                        let _ = control.write_all(reply.as_bytes()).await;
+                        data_listener = Some(dl);
+                    } else if upper.starts_with("RETR ")
+                        || upper.starts_with("MLSD ")
+                        || upper.starts_with("NLST ")
+                    {
+                        let body = match (&payload, upper.split_once(' ').map(|(k, _)| k)) {
+                            (PasvPayload::Retr(b), Some("RETR")) => *b,
+                            (PasvPayload::Mlsd(b), Some("MLSD")) => *b,
+                            (PasvPayload::Nlst(b), Some("NLST")) => *b,
+                            _ => {
+                                let _ = control.write_all(b"502 Command not implemented\r\n").await;
+                                continue;
+                            }
+                        };
+                        let Some(dl) = data_listener.take() else {
+                            let _ = control.write_all(b"425 No data connection\r\n").await;
+                            continue;
+                        };
+                        let _ = control.write_all(b"150 Opening data connection\r\n").await;
+                        if let Ok((mut data, _)) = dl.accept().await {
+                            let _ = data.write_all(body).await;
+                        }
+                        let _ = control.write_all(b"226 Transfer complete\r\n").await;
+                    } else if upper == "QUIT" {
+                        let _ = control.write_all(b"221 Bye\r\n").await;
+                        break;
+                    } else {
+                        let _ = control.write_all(b"502 Command not implemented\r\n").await;
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    fn quiet_cfg() -> Config {
+        Config {
+            quiet: true,
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn parse_pasv_ok() {
         let addr = parse_pasv("227 Entering Passive Mode (127,0,0,1,4,1)").unwrap();
         assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 1025)));
+    }
+
+    #[test]
+    fn parse_pasv_rejects_bad_replies() {
+        assert!(matches!(
+            parse_pasv("227 Entering Passive Mode"),
+            Err(Error::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_pasv("227 Entering Passive Mode (127,0,0,1,4"),
+            Err(Error::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_pasv("227 (127,0,0,1)"),
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[test]
@@ -1143,6 +1460,27 @@ mod tests {
     fn reject_nul_in_path() {
         let err = reject_ftp_injection("a\0b", "FTP path").unwrap_err();
         assert!(err.to_string().contains("illegal control"));
+    }
+
+    #[test]
+    fn reject_ftp_injection_clean_and_lf() {
+        reject_ftp_injection("alice", "FTP user").unwrap();
+        let err = reject_ftp_injection("bad\nname", "FTP path").unwrap_err();
+        assert!(err.to_string().contains("illegal control"));
+    }
+
+    #[test]
+    fn sanitize_entry_name_filters() {
+        assert_eq!(
+            sanitize_entry_name("\"readme.txt\"").as_deref(),
+            Some("readme.txt")
+        );
+        assert!(sanitize_entry_name(".").is_none());
+        assert!(sanitize_entry_name("..").is_none());
+        assert!(sanitize_entry_name("").is_none());
+        assert!(sanitize_entry_name("a/b").is_none());
+        assert!(sanitize_entry_name("a\\b").is_none());
+        assert!(sanitize_entry_name("a\0b").is_none());
     }
 
     #[test]
@@ -1190,6 +1528,16 @@ mod tests {
             Some(0o4644)
         );
         assert_eq!(
+            parse_unix_mode_from_list_line("-rwxr-xr-t 1 u g 1 Jan 1 00:00 sticky"),
+            Some(0o1755)
+        );
+        assert_eq!(
+            parse_unix_mode_from_list_line("-rwxr-xr-T 1 u g 1 Jan 1 00:00 sticky"),
+            Some(0o1754)
+        );
+        assert!(parse_unix_mode_from_list_line("short").is_none());
+        assert!(parse_unix_mode_from_list_line("crw-r--r-- 1 u g 1 Jan 1 00:00 n").is_none());
+        assert_eq!(
             unix_mode_for_basename(
                 "-rw-r--r-- 1 user group 123 Jan  1 12:00 readme.txt\n\
                  drwxr-xr-x 2 user group 4096 Jan  1 12:00 docs\n",
@@ -1204,6 +1552,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_unix_mode_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("fetchling-ftp-mode-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        apply_unix_mode(&path, 0o644);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1227,6 +1587,26 @@ type=file;size=1; bad/name
             entries[2].kind,
             FtpEntryKind::Symlink {
                 target: Some("target.bin".into())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_mlsd_cdir_other_and_skipped() {
+        let text = "\
+type=cdir; dirname
+type=weird; odd
+type=OS.unix=symlink;unix.symlink=tgt; link
+nospace
+";
+        let entries = parse_mlsd(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].kind, FtpEntryKind::Dir);
+        assert_eq!(entries[1].kind, FtpEntryKind::Other);
+        assert_eq!(
+            entries[2].kind,
+            FtpEntryKind::Symlink {
+                target: Some("tgt".into())
             }
         );
     }
@@ -1258,10 +1638,29 @@ lrwxrwxrwx 1 user group    5 Jan  1 12:00 other -> ../escape
     }
 
     #[test]
+    fn parse_unix_list_skips_and_dangling_symlink() {
+        let text = "\
+total 2
+drwxr-xr-x 2 user group 4096 Jan  1 12:00 .
+drwxr-xr-x 2 user group 4096 Jan  1 12:00 ..
+-rw-r--r-- 1 user
+lrwxrwxrwx 1 user group    4 Jan  1 12:00 dangling
+-rw-r--r-- 1 user group 123 Jan  1 12:00 keep.txt
+";
+        let entries = parse_unix_list(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, FtpEntryKind::Symlink { target: None });
+        assert_eq!(entries[0].name, "dangling");
+        assert_eq!(entries[1].name, "keep.txt");
+    }
+
+    #[test]
     fn ftps_port_selection() {
         let explicit = Url::parse("ftps://example.com/file").unwrap();
         let cfg = Config::default();
         assert_eq!(ftp_control_port(&explicit, &cfg), 21);
+        assert!(wants_ftps(&explicit));
+        assert!(!wants_ftps(&Url::parse("ftp://example.com/file").unwrap()));
 
         let cfg_impl = Config {
             ftps_implicit: true,
@@ -1297,5 +1696,67 @@ lrwxrwxrwx 1 user group    5 Jan  1 12:00 other -> ../escape
         assert!(auth_tls_accepted("334 Next"));
         assert!(!auth_tls_accepted("500 Unknown command"));
         assert!(!auth_tls_accepted("502 AUTH TLS not supported"));
+    }
+
+    #[tokio::test]
+    async fn download_and_glob_reject_non_ftp_scheme() {
+        let cfg = quiet_cfg();
+        let client = FtpClient::default();
+        let url = Url::parse("http://example.com/file.bin").unwrap();
+        let err = client
+            .download(&cfg, &url, Path::new("unused.bin"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+        let err = client.expand_glob(&cfg, &url).await.unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn download_retr_via_pasv_localhost() {
+        let addr = spawn_pasv_ftp(PasvPayload::Retr(b"ftp-bytes")).await;
+        let dest = std::env::temp_dir().join(format!("fetchling-ftp-retr-{}", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        let url = Url::parse(&format!("ftp://127.0.0.1:{}/hello.bin", addr.port())).unwrap();
+        let outcome = FtpClient::default()
+            .download(&quiet_cfg(), &url, &dest)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, FtpDownloadOutcome::File { bytes: 9 }));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ftp-bytes");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_listing_mlsd_via_pasv_localhost() {
+        let addr = spawn_pasv_ftp(PasvPayload::Mlsd(b"type=file;size=1; readme.txt\n")).await;
+        let dest = std::env::temp_dir().join(format!("fetchling-ftp-mlsd-{}", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        let url = Url::parse(&format!("ftp://127.0.0.1:{}/pub/", addr.port())).unwrap();
+        let outcome = FtpClient::default()
+            .download(&quiet_cfg(), &url, &dest)
+            .await
+            .unwrap();
+        match outcome {
+            FtpDownloadOutcome::Listing { bytes, entries } => {
+                assert_eq!(bytes, 29);
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].name, "readme.txt");
+                assert_eq!(entries[0].kind, FtpEntryKind::File);
+            }
+            FtpDownloadOutcome::File { .. } => panic!("expected listing"),
+        }
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn expand_glob_nlst_via_pasv_localhost() {
+        let addr = spawn_pasv_ftp(PasvPayload::Nlst(b"a.bin\nb.bin\nskip.txt\n")).await;
+        let url = Url::parse(&format!("ftp://127.0.0.1:{}/pub/*.bin", addr.port())).unwrap();
+        let names = FtpClient::default()
+            .expand_glob(&quiet_cfg(), &url)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["a.bin".to_string(), "b.bin".to_string()]);
     }
 }

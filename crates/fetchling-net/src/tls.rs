@@ -1,3 +1,5 @@
+//! rustls connector construction, certificate pinning, and a small HSTS store.
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,10 +19,32 @@ use tokio_rustls::TlsConnector;
 
 use rustls::crypto::CryptoProvider;
 
+/// Build a rustls client connector with session resumption enabled.
+///
+/// Roots come from webpki-roots plus optional `ca_certificate` / `ca_directory`.
+/// `secure_protocol` selects `auto`, `TLSv1_2`, or `TLSv1_3`. When
+/// `check_certificate` is false, server certificates are not verified. Optional
+/// `pinnedpubkey` (`sha256//…` or a key/cert file), `crl_file`, and client
+/// certificates (`certificate` + `private_key`) are applied when set.
+///
+/// # Errors
+///
+/// Returns [`Error::Tls`] for unsupported protocol
+/// versions, missing client-cert pairs, pin/CRL/CA parse failures, or rustls
+/// configuration errors. Returns [`Error::Io`] when
+/// a configured file cannot be read.
 pub fn build_connector(cfg: &Config) -> Result<TlsConnector> {
     build_connector_resumable(cfg, true)
 }
 
+/// Build a rustls client connector, optionally disabling session resumption.
+///
+/// Same as [`build_connector`], but `resume: false` disables TLS session
+/// resumption (needed for some FTPS data channels).
+///
+/// # Errors
+///
+/// Same as [`build_connector`].
 pub fn build_connector_resumable(cfg: &Config, resume: bool) -> Result<TlsConnector> {
     ensure_crypto_provider();
     let mut root_store = rustls::RootCertStore::empty();
@@ -414,13 +438,20 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
-/// Very small HSTS store (host -> include_subdomains expiry unix).
+/// Host → (`includeSubDomains`, expiry unix) HSTS store.
+///
+/// Persistence uses tab-separated lines: `host\tinclude_subdomains\texpiry_unix`
+/// (`include_subdomains` is `1` or `0`). [`HstsStore::learn`] parses
+/// `Strict-Transport-Security`; `max-age=0` deletes the host.
+/// `includeSubDomains` on a bare TLD (no `.` in the stored host) does not match
+/// every `*.tld` name.
 #[derive(Debug, Default, Clone)]
 pub struct HstsStore {
     entries: std::collections::HashMap<String, (bool, i64)>,
 }
 
 impl HstsStore {
+    /// Load a store from `path`, or an empty store if the file is missing.
     pub fn load(path: &str) -> Self {
         let mut store = Self::default();
         if let Ok(text) = std::fs::read_to_string(path) {
@@ -438,6 +469,7 @@ impl HstsStore {
         store
     }
 
+    /// Whether `host` should be upgraded from HTTP to HTTPS.
     pub fn should_upgrade(&self, host: &str) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -460,6 +492,9 @@ impl HstsStore {
         false
     }
 
+    /// Record a `Strict-Transport-Security` header for `host`.
+    ///
+    /// `max-age=0` removes the host. Unparseable values are ignored.
     pub fn learn(&mut self, host: &str, header_value: &str) {
         let Some((max_age, include_sub)) = parse_sts_header(header_value) else {
             return;
@@ -476,6 +511,12 @@ impl HstsStore {
         self.entries.insert(host.to_string(), (include_sub, exp));
     }
 
+    /// Write the store to `path` in tab-separated form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the file cannot be
+    /// created or written.
     pub fn save(&self, path: &str) -> Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(path)?;
@@ -543,6 +584,26 @@ mod tests {
     }
 
     #[test]
+    fn hsts_load_missing_expired_and_malformed() {
+        let s = HstsStore::load("/no/such/fetchling-hsts-missing");
+        assert!(!s.should_upgrade("example.com"));
+
+        let s = store_with("example.com", false, 1);
+        assert!(!s.should_upgrade("example.com"));
+
+        let path =
+            std::env::temp_dir().join(format!("fetchling-hsts-malformed-{}", std::process::id()));
+        std::fs::write(&path, "not-a-valid-line\nexample.com\t0\tnotanumber\n").unwrap();
+        let loaded = HstsStore::load(path.to_str().unwrap());
+        assert!(!loaded.should_upgrade("example.com"));
+        let _ = std::fs::remove_file(&path);
+
+        let mut s = HstsStore::default();
+        s.learn("example.com", "includeSubDomains");
+        assert!(!s.should_upgrade("example.com"));
+    }
+
+    #[test]
     fn hsts_learn_and_save_roundtrip() {
         let mut s = HstsStore::default();
         s.learn("example.com", "max-age=100; includeSubDomains");
@@ -567,12 +628,19 @@ mod tests {
             Some((60, true))
         );
         assert_eq!(parse_sts_header("includeSubDomains"), None);
+        assert_eq!(parse_sts_header("max-age=\"60\""), Some((60, false)));
+        assert_eq!(
+            parse_sts_header("MAX-AGE=60; IncludeSubDomains"),
+            Some((60, true))
+        );
     }
 
     #[test]
     fn protocol_versions_accepts_supported() {
         assert!(protocol_versions("auto").is_ok());
+        assert!(protocol_versions("").is_ok());
         assert!(protocol_versions("TLSv1_2").is_ok());
+        assert!(protocol_versions("TLS1_2").is_ok());
         assert!(protocol_versions("TLSv1_3").is_ok());
         assert!(protocol_versions("TLS1_3").is_ok());
         assert!(protocol_versions("SSLv3").is_err());
@@ -603,9 +671,56 @@ mod tests {
         let pins = parse_pinnedpubkey(&format!("sha256//{b64}")).unwrap();
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0], zeros);
+        let pins = parse_pinnedpubkey(&format!("SHA256//{b64}")).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0], zeros);
         let pins = parse_pinnedpubkey(&format!("sha256//{b64};sha256//{b64}")).unwrap();
         assert_eq!(pins.len(), 2);
         assert!(parse_pinnedpubkey("not-a-pin").is_err());
+        assert!(parse_pinnedpubkey("").is_err());
+        assert!(parse_pinnedpubkey(";;;").is_err());
+        assert!(parse_pinnedpubkey("sha256//QQ==").is_err());
+    }
+
+    #[test]
+    fn build_connector_config_branches() {
+        let cfg = Config {
+            check_certificate: false,
+            ..Config::default()
+        };
+        build_connector(&cfg).unwrap();
+
+        let cfg = Config {
+            secure_protocol: "TLSv1_3".into(),
+            ..Config::default()
+        };
+        build_connector(&cfg).unwrap();
+        build_connector_resumable(&cfg, false).unwrap();
+
+        let cfg = Config {
+            certificate: Some("client.pem".into()),
+            private_key: None,
+            ..Config::default()
+        };
+        assert!(matches!(build_connector(&cfg), Err(Error::Tls(_))));
+        let cfg = Config {
+            certificate: None,
+            private_key: Some("key.pem".into()),
+            ..Config::default()
+        };
+        assert!(matches!(build_connector(&cfg), Err(Error::Tls(_))));
+    }
+
+    #[test]
+    fn load_client_certs_and_key_reject_unsupported_types() {
+        let path =
+            std::env::temp_dir().join(format!("fetchling-net-keytype-{}", std::process::id()));
+        std::fs::write(&path, b"dummy").unwrap();
+        let err = load_client_certs(&path, "foo").unwrap_err();
+        assert!(matches!(err, Error::Tls(_)));
+        let err = load_private_key(&path, "foo").unwrap_err();
+        assert!(matches!(err, Error::Tls(_)));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

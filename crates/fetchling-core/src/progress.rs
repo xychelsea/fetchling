@@ -1,3 +1,5 @@
+//! Logging and download progress indicators (bar / dot).
+
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -12,6 +14,7 @@ const DOT_BYTES: u64 = 1024;
 const DOTS_PER_LINE: u32 = 50;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Configurable logger (verbose / debug / server-response / optional logfile).
 #[derive(Clone)]
 pub struct Logger {
     verbose: bool,
@@ -22,6 +25,13 @@ pub struct Logger {
 }
 
 impl Logger {
+    /// Build a logger from [`Config`].
+    ///
+    /// Opens `cfg.logfile` when set (`append_output` controls append vs truncate).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`](crate::Error::Io) if the logfile cannot be opened.
     pub fn new(cfg: &Config) -> Result<Self> {
         let file = if let Some(path) = &cfg.logfile {
             let f = OpenOptions::new()
@@ -80,12 +90,14 @@ impl Logger {
         self.write_line(true, msg);
     }
 
+    /// Debug line prefixed with `DEBUG:` when `cfg.debug` is set.
     pub fn debug(&self, msg: &str) {
         if self.debug {
             self.write_line(true, &format!("DEBUG: {msg}"));
         }
     }
 
+    /// Print server response (or any line) when `server_response` or `debug` is set.
     pub fn server(&self, msg: &str) {
         if self.server_response || self.debug {
             self.write_line(true, msg);
@@ -93,10 +105,12 @@ impl Logger {
     }
 }
 
+/// Whether narrative download lines should print (`verbose` and stderr is a TTY).
 pub fn narrative_enabled(verbose: bool, is_tty: bool) -> bool {
     verbose && is_tty
 }
 
+/// Opening narrative line for a fetch (URL with userinfo redacted).
 pub fn format_fetch_start(url: &str) -> String {
     redact_url_for_log(url)
 }
@@ -136,14 +150,17 @@ pub fn format_dns(host: &str, addrs: &[std::net::SocketAddr]) -> String {
     format!("  dns {host}  {}", ips.join(", "))
 }
 
+/// Connected-peer line: `  connected {addr}`.
 pub fn format_connected(addr: std::net::SocketAddr) -> String {
     format!("  connected {addr}")
 }
 
+/// Keep-alive reuse line: `  reusing connection {host}:{port}`.
 pub fn format_reuse(host: &str, port: u16) -> String {
     format!("  reusing connection {host}:{port}")
 }
 
+/// HTTP status narrative line (`  HTTP {code}` or with reason phrase).
 pub fn format_http_status(code: u16, reason: Option<&str>) -> String {
     match reason.map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => format!("  HTTP {code} {r}"),
@@ -153,12 +170,16 @@ pub fn format_http_status(code: u16, reason: Option<&str>) -> String {
 
 /// Length / content-type line; `None` when neither is known.
 ///
-/// When `already` is set (resume), appends `, R (human) remaining`.
+/// For resume transfers that need a remaining-bytes note, use
+/// [`format_length_detail`].
 pub fn format_length(bytes: Option<u64>, content_type: Option<&str>) -> Option<String> {
     format_length_detail(bytes, None, content_type)
 }
 
 /// Length line with optional resume offset (`already` bytes already on disk).
+///
+/// When `already` is set and less than `total`, appends
+/// `, R (human) remaining`.
 pub fn format_length_detail(
     total: Option<u64>,
     already: Option<u64>,
@@ -208,8 +229,8 @@ enum ProgressStyle {
 
 /// Whether a progress indicator should be drawn on stderr.
 ///
-/// `bar` is TTY-only by default; `--show-progress` forces it when piped.
-/// `dot` works without a TTY (log-style output). Quiet always disables.
+/// Quiet always disables. Style `bar` is TTY-only unless `show_progress` is
+/// true (forces the bar when piped). Style `dot` works without a TTY.
 pub fn progress_enabled(quiet: bool, show_progress: bool, style: &str, is_tty: bool) -> bool {
     if quiet {
         return false;
@@ -235,6 +256,7 @@ pub fn dest_label(dest: &Path) -> String {
     }
 }
 
+/// Human-readable byte size (`500B`, `1.50KB`, `1.00MB`, …).
 pub fn format_bytes(n: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut value = n as f64;
@@ -254,6 +276,7 @@ pub fn format_bytes(n: u64) -> String {
     }
 }
 
+/// Transfer rate string (`1.00MB/s` or bits/s when `bits` is true).
 pub fn format_rate(bytes: u64, elapsed: Duration, bits: bool) -> String {
     let secs = elapsed.as_secs_f64().max(1e-6);
     let per_sec = bytes as f64 / secs;
@@ -282,6 +305,7 @@ fn format_bits(bits_per_sec: f64) -> String {
     }
 }
 
+/// ETA string from remaining bytes and bytes/sec (`None` if rate is too low).
 pub fn format_eta(remaining_bytes: u64, bytes_per_sec: f64) -> Option<String> {
     if bytes_per_sec < 1.0 {
         return None;
@@ -300,6 +324,7 @@ pub fn format_eta(remaining_bytes: u64, bytes_per_sec: f64) -> Option<String> {
     }
 }
 
+/// Simple percent bar (`pct` of 100) with the given character width.
 pub fn render_bar(pct: u64, width: usize) -> String {
     render_bar_parts(pct.min(100), 0, 100, width)
 }
@@ -333,6 +358,19 @@ pub fn render_bar_parts(current: u64, initial: u64, total: u64, width: usize) ->
     out
 }
 
+/// Live download progress indicator (`bar` or `dot` style from [`Config`]).
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_core::{Config, ProgressBar};
+///
+/// let mut cfg = Config::default();
+/// cfg.quiet = true;
+/// let mut bar = ProgressBar::new(&cfg, Some(1024), "file.bin");
+/// bar.update(512);
+/// bar.finish();
+/// ```
 pub struct ProgressBar {
     enabled: bool,
     style: ProgressStyle,
@@ -352,6 +390,7 @@ pub struct ProgressBar {
 }
 
 impl ProgressBar {
+    /// Create a progress bar starting at byte 0.
     pub fn new(cfg: &Config, total: Option<u64>, label: impl Into<String>) -> Self {
         Self::with_initial(cfg, total, 0, label)
     }
@@ -389,6 +428,7 @@ impl ProgressBar {
         }
     }
 
+    /// Advance by `n` bytes and redraw when due.
     pub fn update(&mut self, n: u64) {
         self.current = self.current.saturating_add(n);
         if !self.enabled {
@@ -410,6 +450,7 @@ impl ProgressBar {
         }
     }
 
+    /// Final redraw and clear the progress line for following status output.
     pub fn finish(&mut self) {
         if !self.enabled {
             return;
@@ -700,5 +741,82 @@ mod tests {
     #[test]
     fn format_saving_as_name_only() {
         assert_eq!(format_saving_as("file.bin"), "  saving as file.bin");
+    }
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn logger_writes_errors_to_logfile() {
+        let dir = TempDir::new("fetchling-log");
+        let log_path = dir.path().join("out.log");
+        let cfg = Config {
+            quiet: true,
+            verbose: false,
+            logfile: Some(log_path.display().to_string()),
+            append_output: false,
+            ..Default::default()
+        };
+
+        let log = Logger::new(&cfg).unwrap();
+        log.error("boom");
+        // info is suppressed when not verbose
+        log.info("hidden");
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("boom"), "{contents}");
+        assert!(!contents.contains("hidden"), "{contents}");
+    }
+
+    #[test]
+    fn logger_append_vs_truncate() {
+        let dir = TempDir::new("fetchling-log-append");
+        let log_path = dir.path().join("out.log");
+        std::fs::write(&log_path, "prior\n").unwrap();
+
+        let mut cfg = Config {
+            logfile: Some(log_path.display().to_string()),
+            append_output: false,
+            ..Default::default()
+        };
+        {
+            let log = Logger::new(&cfg).unwrap();
+            log.error("fresh");
+        }
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(!contents.contains("prior"), "{contents}");
+        assert!(contents.contains("fresh"), "{contents}");
+
+        cfg.append_output = true;
+        {
+            let log = Logger::new(&cfg).unwrap();
+            log.error("again");
+        }
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("fresh"), "{contents}");
+        assert!(contents.contains("again"), "{contents}");
     }
 }

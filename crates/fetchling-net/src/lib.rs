@@ -1,4 +1,103 @@
-//! DNS helpers, timeouts, rate limiting, and dual-stack connect.
+//! DNS, TCP, TLS, HTTP-proxy, and rate-limiting primitives for a retriever.
+//!
+//! # What this crate is (and is not)
+//!
+//! IS: DNS ([`DnsCache`]), TCP connect and Happy Eyeballs
+//! ([`connect_tcp`], [`connect_happy_eyeballs`]), rustls connector builders
+//! ([`build_connector`], [`build_connector_resumable`]), HTTP CONNECT and
+//! absolute-form proxy helpers, a token-bucket [`RateLimiter`], and a small
+//! [`HstsStore`]. The public API is flat: items are re-exported at the crate
+//! root. Drive behavior with [`fetchling_core::Config`] fields set directly;
+//! CLI / wget names in those field docs are compatibility aliases. Async entry
+//! points need a Tokio runtime.
+//!
+//! IS NOT: HTTP request/response framing, FTP, connection pooling, recursive
+//! retrieval, or SOCKS—those live in other `fetchling-*` crates or your own
+//! protocol code. This crate does not re-export [`Config`]
+//! or [`Error`].
+//!
+//! # Typical integration
+//!
+//! 1. Start from [`Config::default`] and set net
+//!    fields (`dns_servers`, timeouts, `limit_rate`, TLS, proxies)
+//! 2. Create [`DnsCache::new`] and call [`DnsCache::lookup`]
+//! 3. Connect with [`connect_happy_eyeballs`] / [`connect_tcp`], or a proxy path
+//!    ([`proxy_url_for`] → [`proxy_bypassed`] → [`connect_to_proxy`] or
+//!    [`connect_via_http_connect`])
+//! 4. Call [`build_connector`] and handshake with the returned
+//!    [`tokio_rustls::TlsConnector`]
+//! 5. Wrap body reads with [`RateLimiter::new`] (`cfg.limit_rate`); optionally
+//!    use [`HstsStore`] for HTTP→HTTPS upgrades
+//!
+//! # Areas
+//!
+//! - **DNS** — [`DnsCache`]
+//! - **TCP** — [`connect_tcp`], [`connect_happy_eyeballs`], [`read_timeout_dur`]
+//! - **TLS** — [`build_connector`], [`build_connector_resumable`]
+//! - **Proxy** — [`proxy_url_for`], [`proxy_endpoint_key`], [`connect_to_proxy`],
+//!   [`absolute_http_request_target`], [`proxy_bypassed`],
+//!   [`host_matches_no_proxy`], [`format_http_connect_request`],
+//!   [`proxy_basic_auth`], [`connect_via_http_connect`]
+//! - **Rate limit** — [`RateLimiter`]
+//! - **HSTS** — [`HstsStore`]
+//!
+//! # Examples
+//!
+//! Rate limiter, proxy helpers, and HSTS (no network):
+//!
+//! ```
+//! use fetchling_core::Config;
+//! use fetchling_net::{
+//!     format_http_connect_request, host_matches_no_proxy, proxy_endpoint_key,
+//!     HstsStore, RateLimiter,
+//! };
+//!
+//! let mut cfg = Config::default();
+//! cfg.limit_rate = Some(64 * 1024);
+//! assert!(RateLimiter::new(cfg.limit_rate).is_some());
+//!
+//! assert_eq!(
+//!     proxy_endpoint_key(Some("http://proxy.example:8080/")),
+//!     "http://proxy.example:8080"
+//! );
+//! assert!(host_matches_no_proxy("a.example.com", "example.com"));
+//!
+//! let req = format_http_connect_request("example.com", 443, None);
+//! assert!(req.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+//!
+//! let mut hsts = HstsStore::default();
+//! hsts.learn("example.com", "max-age=31536000; includeSubDomains");
+//! assert!(hsts.should_upgrade("example.com"));
+//! assert!(hsts.should_upgrade("www.example.com"));
+//! ```
+//!
+//! Build a rustls connector from default config:
+//!
+//! ```
+//! use fetchling_core::Config;
+//! use fetchling_net::build_connector;
+//!
+//! let connector = build_connector(&Config::default()).unwrap();
+//! let _ = connector;
+//! ```
+//!
+//! Resolve, connect, and prepare TLS (does not run; needs a network):
+//!
+//! ```no_run
+//! use fetchling_core::Config;
+//! use fetchling_net::{build_connector, connect_happy_eyeballs, DnsCache};
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! let cfg = Config::default();
+//! let dns = DnsCache::new();
+//! let addrs = dns.lookup(&cfg, "example.com", 443).await.unwrap();
+//! let _stream = connect_happy_eyeballs(&cfg, &addrs).await.unwrap();
+//! let _tls = build_connector(&cfg).unwrap();
+//! # }
+//! ```
+
+#![warn(missing_docs)]
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -15,16 +114,32 @@ pub use tls::{build_connector, build_connector_resumable, HstsStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
+/// In-process DNS cache keyed by `host:port`.
+///
+/// Lookups use the system resolver unless [`fetchling_core::Config::dns_servers`]
+/// or [`fetchling_core::Config::bind_dns_address`] is set, in which case Hickory
+/// is used. Results are filtered or sorted by `inet4_only`, `inet6_only`, and
+/// `prefer_family`. Caching is honored only when
+/// [`fetchling_core::Config::dns_cache`] is true (the default).
 #[derive(Debug, Clone, Default)]
 pub struct DnsCache {
     inner: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<SocketAddr>>>>,
 }
 
 impl DnsCache {
+    /// Create an empty cache.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Resolve `host`:`port` to socket addresses, optionally using the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Network`] when lookup
+    /// fails, times out, or yields no addresses. Returns
+    /// [`Error::Parse`] for a bad `dns_servers` or
+    /// `bind_dns_address` value.
     pub async fn lookup(&self, cfg: &Config, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         let key = format!("{host}:{port}");
         if cfg.dns_cache {
@@ -184,6 +299,10 @@ fn parse_nameserver(s: &str) -> Result<SocketAddr> {
     )))
 }
 
+/// Resolve the I/O timeout from [`fetchling_core::Config`].
+///
+/// Uses `read_timeout` if set, otherwise `timeout`. Returns `None` when both
+/// are unset or the chosen value is `<= 0`.
 pub fn read_timeout_dur(cfg: &Config) -> Option<Duration> {
     cfg.read_timeout
         .or(cfg.timeout)
@@ -191,6 +310,15 @@ pub fn read_timeout_dur(cfg: &Config) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
+/// Open a TCP connection to `addr`.
+///
+/// Honors optional `bind_address`, `connect_timeout` (falling back to
+/// `timeout`), and sets `TCP_NODELAY` on success.
+///
+/// # Errors
+///
+/// Returns [`Error::Network`] on bind, connect,
+/// or timeout failure.
 pub async fn connect_tcp(cfg: &Config, addr: SocketAddr) -> Result<TcpStream> {
     let connect_timeout = cfg
         .connect_timeout
@@ -258,7 +386,13 @@ async fn resolve_bind_addr(bind: &str, peer: SocketAddr) -> Result<SocketAddr> {
 ///
 /// Tries the preferred address family immediately and the other family after
 /// 250ms; first successful connection wins. Falls back to sequential tries when
-/// only one family is present.
+/// only one family is present. When `retry_connrefused` is false, a connection
+/// refused error aborts instead of trying the next address.
+///
+/// # Errors
+///
+/// Returns [`Error::Network`] when no address
+/// connects.
 pub async fn connect_happy_eyeballs(cfg: &Config, addrs: &[SocketAddr]) -> Result<TcpStream> {
     if addrs.is_empty() {
         return Err(Error::Network("no addresses to connect".into()));
@@ -321,6 +455,11 @@ pub async fn connect_happy_eyeballs(cfg: &Config, addrs: &[SocketAddr]) -> Resul
     }
 }
 
+/// Token-bucket download rate limiter.
+///
+/// Tokens refill from elapsed time and are capped at `2 * bytes_per_sec`.
+/// [`RateLimiter::new`] returns `None` when the rate is unset. A rate of `0` is
+/// treated as 1 byte/s.
 pub struct RateLimiter {
     bytes_per_sec: u64,
     allowed: u64,
@@ -328,6 +467,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// Create a limiter for `bytes_per_sec`, or `None` if the rate is unset.
     pub fn new(bytes_per_sec: Option<u64>) -> Option<Self> {
         bytes_per_sec.map(|b| Self {
             bytes_per_sec: b.max(1),
@@ -336,6 +476,7 @@ impl RateLimiter {
         })
     }
 
+    /// Consume `n` bytes of quota, sleeping until tokens are available.
     pub async fn take(&mut self, n: u64) {
         self.refill();
         while self.allowed < n {
@@ -357,6 +498,11 @@ impl RateLimiter {
     }
 }
 
+/// Proxy URL for `scheme` (`http`, `https`, or `ftp`).
+///
+/// Returns `None` unless [`fetchling_core::Config::use_proxy`] is true. Prefers
+/// `http_proxy` / `https_proxy` on [`fetchling_core::Config`], then the matching
+/// environment variable in either case (`http_proxy` / `HTTP_PROXY`).
 pub fn proxy_url_for(cfg: &Config, scheme: &str) -> Option<String> {
     if !cfg.use_proxy {
         return None;
@@ -381,6 +527,10 @@ pub fn proxy_url_for(cfg: &Config, scheme: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Normalized `scheme://host:port` key for connection pooling.
+///
+/// Empty or missing URLs yield an empty string. Unparseable values are returned
+/// unchanged.
 pub fn proxy_endpoint_key(proxy_url: Option<&str>) -> String {
     let Some(raw) = proxy_url.filter(|s| !s.is_empty()) else {
         return String::new();
@@ -395,6 +545,15 @@ pub fn proxy_endpoint_key(proxy_url: Option<&str>) -> String {
     }
 }
 
+/// TCP-connect to an HTTP proxy and return the stream plus parsed proxy URL.
+///
+/// Does not send CONNECT; use this for plain HTTP absolute-form requests.
+/// For HTTPS through a proxy, use [`connect_via_http_connect`].
+///
+/// # Errors
+///
+/// Returns [`Error::Network`] for a bad proxy
+/// URL, DNS failure, or TCP connect failure.
 pub async fn connect_to_proxy(
     cfg: &Config,
     dns: &DnsCache,
@@ -413,6 +572,23 @@ pub async fn connect_to_proxy(
     Ok((stream, proxy))
 }
 
+/// Absolute-form request target for HTTP requests sent through a proxy.
+///
+/// IPv6 hosts are wrapped in brackets when the URL host is not already
+/// bracketed.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_net::absolute_http_request_target;
+/// use url::Url;
+///
+/// let url = Url::parse("http://example.com:8080/a/b?x=1").unwrap();
+/// assert_eq!(
+///     absolute_http_request_target(&url),
+///     "http://example.com:8080/a/b?x=1"
+/// );
+/// ```
 pub fn absolute_http_request_target(url: &Url) -> String {
     let mut s = format!("{}://", url.scheme());
     if let Some(host) = url.host_str() {
@@ -441,6 +617,7 @@ pub fn absolute_http_request_target(url: &Url) -> String {
     s
 }
 
+/// Whether `host` is listed in the `no_proxy` / `NO_PROXY` environment variable.
 pub fn proxy_bypassed(host: &str) -> bool {
     let list = match std::env::var("no_proxy").or_else(|_| std::env::var("NO_PROXY")) {
         Ok(v) if !v.trim().is_empty() => v,
@@ -449,6 +626,22 @@ pub fn proxy_bypassed(host: &str) -> bool {
     host_matches_no_proxy(host, &list)
 }
 
+/// Whether `host` matches a `no_proxy`-style comma/space-separated `list`.
+///
+/// `*` matches every host. Entries match an exact hostname or a suffix
+/// (`example.com` matches `a.example.com`). A leading `.` on an entry is
+/// ignored.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_net::host_matches_no_proxy;
+///
+/// assert!(host_matches_no_proxy("example.com", "example.com"));
+/// assert!(host_matches_no_proxy("a.example.com", ".example.com"));
+/// assert!(!host_matches_no_proxy("evil-example.com", "example.com"));
+/// assert!(host_matches_no_proxy("anything", "*"));
+/// ```
 pub fn host_matches_no_proxy(host: &str, list: &str) -> bool {
     let host = host.trim().trim_matches(|c| c == '[' || c == ']');
     let host_l = host.to_ascii_lowercase();
@@ -469,6 +662,20 @@ pub fn host_matches_no_proxy(host: &str, list: &str) -> bool {
     false
 }
 
+/// Format an HTTP `CONNECT` request, optionally with Basic proxy authorization.
+///
+/// IPv6 hosts are written as `[host]:port`.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_net::format_http_connect_request;
+///
+/// let req = format_http_connect_request("example.com", 443, None);
+/// assert!(req.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+/// assert!(req.contains("Host: example.com:443\r\n"));
+/// assert!(req.ends_with("\r\n\r\n"));
+/// ```
 pub fn format_http_connect_request(
     target_host: &str,
     target_port: u16,
@@ -493,6 +700,12 @@ fn connect_authority(host: &str, port: u16) -> String {
     }
 }
 
+/// Base64 `user:pass` for `Proxy-Authorization: Basic`.
+///
+/// Prefers [`fetchling_core::Config::proxy_user`] /
+/// [`fetchling_core::Config::proxy_password`], then userinfo on `proxy_url`.
+/// Returns `None` when no username is available. A missing password is treated
+/// as empty.
 pub fn proxy_basic_auth(cfg: &Config, proxy_url: &Url) -> Option<String> {
     let user = cfg.proxy_user.clone().or_else(|| {
         let u = proxy_url.username();
@@ -511,6 +724,16 @@ pub fn proxy_basic_auth(cfg: &Config, proxy_url: &Url) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}").as_bytes()))
 }
 
+/// Open a TCP tunnel through an HTTP proxy with `CONNECT`.
+///
+/// Succeeds only on a 2xx CONNECT response. Use this for HTTPS (or other
+/// tunneled) traffic; for plain HTTP via proxy, use [`connect_to_proxy`] and
+/// [`absolute_http_request_target`].
+///
+/// # Errors
+///
+/// Returns [`Error::Network`] for a bad proxy
+/// URL, DNS/TCP failure, a truncated CONNECT exchange, or a non-2xx status.
 pub async fn connect_via_http_connect(
     cfg: &Config,
     dns: &DnsCache,
@@ -573,17 +796,8 @@ pub async fn connect_via_http_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    #[test]
-    fn prefer_family_sorts_lookup_results() {
-        let addrs = [
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80),
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 80),
-        ];
-        assert_eq!(addrs.iter().filter(|a| a.is_ipv4()).count(), 1);
-        assert_eq!(addrs.iter().filter(|a| a.is_ipv6()).count(), 1);
-    }
+    use std::net::Ipv4Addr;
+    use tokio::net::TcpListener;
 
     #[test]
     fn parse_nameserver_ip_and_port() {
@@ -595,6 +809,63 @@ mod tests {
             parse_nameserver("1.1.1.1:5353").unwrap(),
             "1.1.1.1:5353".parse().unwrap()
         );
+        assert_eq!(
+            parse_nameserver("[::1]:53").unwrap(),
+            "[::1]:53".parse().unwrap()
+        );
+        assert!(matches!(parse_nameserver("hostname"), Err(Error::Parse(_))));
+    }
+
+    #[test]
+    fn custom_resolver_rejects_bad_config() {
+        let cfg = Config {
+            dns_servers: Some("  ,  ".into()),
+            ..Config::default()
+        };
+        assert!(matches!(build_custom_resolver(&cfg), Err(Error::Parse(_))));
+        let cfg = Config {
+            bind_dns_address: Some("not-an-ip".into()),
+            ..Config::default()
+        };
+        assert!(matches!(build_custom_resolver(&cfg), Err(Error::Parse(_))));
+    }
+
+    #[test]
+    fn read_timeout_dur_from_config() {
+        assert_eq!(
+            read_timeout_dur(&Config::default()),
+            Some(Duration::from_secs_f64(900.0))
+        );
+        let cfg = Config {
+            read_timeout: Some(10.0),
+            ..Config::default()
+        };
+        assert_eq!(read_timeout_dur(&cfg), Some(Duration::from_secs_f64(10.0)));
+        let cfg = Config {
+            read_timeout: None,
+            timeout: None,
+            ..Config::default()
+        };
+        assert!(read_timeout_dur(&cfg).is_none());
+        let cfg = Config {
+            read_timeout: Some(0.0),
+            timeout: Some(5.0),
+            ..Config::default()
+        };
+        assert!(read_timeout_dur(&cfg).is_none());
+        let cfg = Config {
+            read_timeout: None,
+            timeout: Some(5.0),
+            ..Config::default()
+        };
+        assert_eq!(read_timeout_dur(&cfg), Some(Duration::from_secs_f64(5.0)));
+    }
+
+    #[test]
+    fn rate_limiter_new_from_option() {
+        assert!(RateLimiter::new(None).is_none());
+        assert!(RateLimiter::new(Some(0)).is_some());
+        assert!(RateLimiter::new(Some(1024)).is_some());
     }
 
     #[test]
@@ -604,6 +875,13 @@ mod tests {
         assert!(host_matches_no_proxy("a.example.com", "example.com"));
         assert!(!host_matches_no_proxy("evil-example.com", "example.com"));
         assert!(host_matches_no_proxy("anything", "*"));
+        assert!(host_matches_no_proxy("[2001:db8::1]", "2001:db8::1"));
+        assert!(host_matches_no_proxy(
+            "a.example.com",
+            "other.com, EXAMPLE.COM"
+        ));
+        assert!(!host_matches_no_proxy("example.com", " , "));
+        assert!(host_matches_no_proxy("WWW.EXAMPLE.COM", "example.com"));
     }
 
     #[test]
@@ -622,14 +900,46 @@ mod tests {
     fn proxy_url_prefers_config_over_env() {
         let mut cfg = Config {
             http_proxy: Some("http://cfg-proxy:8080".into()),
+            https_proxy: Some("http://https-proxy:8443".into()),
             ..Config::default()
         };
         assert_eq!(
             proxy_url_for(&cfg, "http").as_deref(),
             Some("http://cfg-proxy:8080")
         );
+        assert_eq!(
+            proxy_url_for(&cfg, "https").as_deref(),
+            Some("http://https-proxy:8443")
+        );
+        assert!(proxy_url_for(&cfg, "gopher").is_none());
+        cfg.http_proxy = Some(String::new());
+        assert_ne!(proxy_url_for(&cfg, "http").as_deref(), Some(""));
         cfg.use_proxy = false;
         assert!(proxy_url_for(&cfg, "http").is_none());
+        assert!(proxy_url_for(&cfg, "ftp").is_none());
+    }
+
+    #[test]
+    fn proxy_basic_auth_sources() {
+        let url = Url::parse("http://alice:secret@proxy.example:8080").unwrap();
+        let cfg = Config::default();
+        assert_eq!(
+            proxy_basic_auth(&cfg, &url).as_deref(),
+            Some("YWxpY2U6c2VjcmV0")
+        );
+        let cfg = Config {
+            proxy_user: Some("bob".into()),
+            proxy_password: Some("pw".into()),
+            ..Config::default()
+        };
+        assert_eq!(proxy_basic_auth(&cfg, &url).as_deref(), Some("Ym9iOnB3"));
+        let url = Url::parse("http://proxy.example:8080").unwrap();
+        assert!(proxy_basic_auth(&Config::default(), &url).is_none());
+        let url = Url::parse("http://alice@proxy.example:8080").unwrap();
+        assert_eq!(
+            proxy_basic_auth(&Config::default(), &url).as_deref(),
+            Some("YWxpY2U6")
+        );
     }
 
     #[test]
@@ -641,14 +951,175 @@ mod tests {
         );
         let u = Url::parse("http://example.com/").unwrap();
         assert_eq!(absolute_http_request_target(&u), "http://example.com/");
+        let u = Url::parse("http://[2001:db8::1]/x").unwrap();
+        assert_eq!(absolute_http_request_target(&u), "http://[2001:db8::1]/x");
+        let u = Url::parse("http://example.com").unwrap();
+        assert_eq!(absolute_http_request_target(&u), "http://example.com/");
     }
 
     #[test]
     fn proxy_endpoint_key_normalizes() {
         assert_eq!(proxy_endpoint_key(None), "");
+        assert_eq!(proxy_endpoint_key(Some("")), "");
         assert_eq!(
             proxy_endpoint_key(Some("http://proxy.example:8080/")),
             "http://proxy.example:8080"
         );
+        assert_eq!(
+            proxy_endpoint_key(Some("http://proxy.example")),
+            "http://proxy.example:80"
+        );
+        assert_eq!(proxy_endpoint_key(Some("not a url")), "not a url");
+    }
+
+    #[tokio::test]
+    async fn dns_cache_lookup_literals_and_filters() {
+        let dns = DnsCache::new();
+        let cfg = Config::default();
+        let addrs = dns.lookup(&cfg, "127.0.0.1", 9).await.unwrap();
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9)]
+        );
+        {
+            let guard = dns.inner.lock().unwrap();
+            assert!(guard.contains_key("127.0.0.1:9"));
+        }
+        let again = dns.lookup(&cfg, "127.0.0.1", 9).await.unwrap();
+        assert_eq!(addrs, again);
+
+        let cfg = Config {
+            inet6_only: true,
+            dns_cache: false,
+            ..Config::default()
+        };
+        let err = dns.lookup(&cfg, "127.0.0.1", 9).await.unwrap_err();
+        assert!(matches!(err, Error::Network(_)));
+
+        let cfg = Config {
+            dns_servers: Some("127.0.0.1".into()),
+            dns_cache: false,
+            ..Config::default()
+        };
+        let addrs = DnsCache::new().lookup(&cfg, "192.0.2.1", 80).await.unwrap();
+        assert_eq!(addrs, vec!["192.0.2.1:80".parse().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_take_with_high_rate() {
+        let mut limiter = RateLimiter::new(Some(1_000_000)).unwrap();
+        limiter.take(16).await;
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_and_happy_eyeballs_localhost() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = connect_tcp(&Config::default(), addr).await.unwrap();
+        drop(stream);
+        accept.await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = connect_happy_eyeballs(&Config::default(), &[addr])
+            .await
+            .unwrap();
+        drop(stream);
+        accept.await.unwrap();
+
+        let err = connect_happy_eyeballs(&Config::default(), &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_to_proxy_localhost() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let proxy = format!("http://127.0.0.1:{}", addr.port());
+        let (_stream, url) = connect_to_proxy(&Config::default(), &DnsCache::new(), &proxy)
+            .await
+            .unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(addr.port()));
+        accept.await.unwrap();
+    }
+
+    async fn serve_connect(listener: TcpListener, response: &'static [u8]) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 512];
+        loop {
+            let n = stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        stream.write_all(response).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_via_http_connect_status_and_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(serve_connect(
+            listener,
+            b"HTTP/1.1 200 Connection Established\r\n\r\n",
+        ));
+        let proxy = format!("http://127.0.0.1:{}", addr.port());
+        connect_via_http_connect(
+            &Config::default(),
+            &DnsCache::new(),
+            &proxy,
+            "example.com",
+            443,
+        )
+        .await
+        .unwrap();
+        accept.await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(serve_connect(
+            listener,
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+        ));
+        let proxy = format!("http://127.0.0.1:{}", addr.port());
+        let err = connect_via_http_connect(
+            &Config::default(),
+            &DnsCache::new(),
+            &proxy,
+            "example.com",
+            443,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Network(_)));
+        accept.await.unwrap();
+
+        let err = connect_via_http_connect(
+            &Config::default(),
+            &DnsCache::new(),
+            "not-a-url",
+            "example.com",
+            443,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Network(_)));
     }
 }

@@ -5,12 +5,18 @@ use crate::{Error, Result};
 pub struct ByteSize(pub u64);
 
 impl ByteSize {
+    /// Return the size in bytes.
     pub fn get(self) -> u64 {
         self.0
     }
 }
 
 /// Parse byte amounts (`20k`, `1m`, plain integers).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for empty input or a non-numeric
+/// amount.
 pub fn parse_bytes(s: &str) -> Result<ByteSize> {
     let s = s.trim();
     if s.is_empty() {
@@ -36,6 +42,11 @@ pub fn parse_bytes(s: &str) -> Result<ByteSize> {
 }
 
 /// Parse durations (`30`, `1m`, `2h`, `1d`).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) for empty input or a non-numeric
+/// duration.
 pub fn parse_seconds(s: &str) -> Result<f64> {
     let s = s.trim();
     if s.is_empty() {
@@ -61,6 +72,11 @@ pub fn parse_seconds(s: &str) -> Result<f64> {
 }
 
 /// Parse tries (`0` / `inf` = infinite, represented as 0).
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`](crate::Error::Parse) if the value is not `inf`, `0`,
+/// or an unsigned integer.
 pub fn parse_tries(s: &str) -> Result<u32> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("inf") || s == "0" {
@@ -78,12 +94,41 @@ mod tests {
     fn bytes_suffixes() {
         assert_eq!(parse_bytes("20k").unwrap().0, 20 * 1024);
         assert_eq!(parse_bytes("1m").unwrap().0, 1024 * 1024);
+        assert_eq!(parse_bytes("1g").unwrap().0, 1024 * 1024 * 1024);
         assert_eq!(parse_bytes("100").unwrap().0, 100);
+        assert_eq!(parse_bytes(" 2K ").unwrap().0, 2 * 1024);
+    }
+
+    #[test]
+    fn bytes_errors() {
+        assert!(parse_bytes("").is_err());
+        assert!(parse_bytes(" ").is_err());
+        assert!(parse_bytes("abc").is_err());
+        assert!(parse_bytes("1x").is_err());
     }
 
     #[test]
     fn duration_suffixes() {
+        assert!((parse_seconds("30").unwrap() - 30.0).abs() < f64::EPSILON);
+        assert!((parse_seconds("1s").unwrap() - 1.0).abs() < f64::EPSILON);
         assert!((parse_seconds("1m").unwrap() - 60.0).abs() < f64::EPSILON);
         assert!((parse_seconds("2h").unwrap() - 7200.0).abs() < f64::EPSILON);
+        assert!((parse_seconds("1d").unwrap() - 86400.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duration_errors() {
+        assert!(parse_seconds("").is_err());
+        assert!(parse_seconds("nope").is_err());
+    }
+
+    #[test]
+    fn tries_values() {
+        assert_eq!(parse_tries("inf").unwrap(), 0);
+        assert_eq!(parse_tries("INF").unwrap(), 0);
+        assert_eq!(parse_tries("0").unwrap(), 0);
+        assert_eq!(parse_tries("3").unwrap(), 3);
+        assert!(parse_tries("").is_err());
+        assert!(parse_tries("nope").is_err());
     }
 }

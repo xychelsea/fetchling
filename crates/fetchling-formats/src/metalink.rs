@@ -3,40 +3,59 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use url::Url;
 
+/// A Metalink file mirror.
 #[derive(Debug, Clone)]
 pub struct MetalinkUrl {
+    /// Mirror URL.
     pub url: Url,
+    /// Optional country/location code.
     pub location: Option<String>,
+    /// Higher values are preferred when location does not decide.
     pub preference: Option<i32>,
 }
 
+/// A Metalink digest (`type` + hex).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetalinkHash {
+    /// Normalized algorithm name (`sha-256`, `sha-1`, …).
     pub algo: String,
+    /// Hex-encoded digest.
     pub hex: String,
 }
 
+/// A Metalink metaurl (another metalink document).
 #[derive(Debug, Clone)]
 pub struct MetalinkMetaUrl {
+    /// Metaurl location.
     pub url: Url,
+    /// Optional media type.
     pub mediatype: Option<String>,
+    /// Optional priority.
     pub priority: Option<i32>,
 }
 
+/// One file entry from a Metalink document.
 #[derive(Debug, Clone)]
 pub struct MetalinkFile {
+    /// File name from the `name` attribute.
     pub name: String,
+    /// Mirror URLs.
     pub urls: Vec<MetalinkUrl>,
+    /// Digests for this file.
     pub hashes: Vec<MetalinkHash>,
 }
 
+/// Parsed Metalink 3/4 document.
 #[derive(Debug, Clone, Default)]
 pub struct MetalinkDoc {
+    /// File entries.
     pub files: Vec<MetalinkFile>,
+    /// Metaurls (links to other metalink documents).
     pub metaurls: Vec<MetalinkMetaUrl>,
 }
 
 impl MetalinkFile {
+    /// Mirror URLs ordered by preferred location, then descending preference.
     pub fn urls_ordered(&self, preferred_location: Option<&str>) -> Vec<&Url> {
         let mut urls: Vec<&MetalinkUrl> = self.urls.iter().collect();
         urls.sort_by(|a, b| {
@@ -58,10 +77,12 @@ impl MetalinkFile {
         urls.into_iter().map(|u| &u.url).collect()
     }
 
+    /// First URL from [`Self::urls_ordered`].
     pub fn pick_url(&self, preferred_location: Option<&str>) -> Option<&Url> {
         self.urls_ordered(preferred_location).into_iter().next()
     }
 
+    /// Hex SHA-256 digest when present.
     pub fn sha256(&self) -> Option<&str> {
         self.hashes
             .iter()
@@ -71,6 +92,9 @@ impl MetalinkFile {
 }
 
 impl MetalinkDoc {
+    /// Pick a metalink-typed metaurl.
+    ///
+    /// `index` is 1-based. Values `<= 0` return the first matching metaurl.
     pub fn select_metaurl(&self, index: i32) -> Option<&MetalinkMetaUrl> {
         let metalink_metas: Vec<_> = self
             .metaurls
@@ -94,6 +118,7 @@ impl MetalinkDoc {
     }
 }
 
+/// Whether `ct` is `application/metalink4+xml` or `application/metalink+xml`.
 pub fn is_metalink_mediatype(ct: &str) -> bool {
     let ct = ct
         .split(';')
@@ -104,7 +129,7 @@ pub fn is_metalink_mediatype(ct: &str) -> bool {
     ct == "application/metalink4+xml" || ct == "application/metalink+xml"
 }
 
-pub fn normalize_hash_algo(algo: &str) -> String {
+pub(crate) fn normalize_hash_algo(algo: &str) -> String {
     let a = algo.trim().to_ascii_lowercase().replace('_', "-");
     match a.as_str() {
         "sha256" | "sha-256" => "sha-256".into(),
@@ -115,10 +140,36 @@ pub fn normalize_hash_algo(algo: &str) -> String {
     }
 }
 
+/// Parse Metalink 3/4 XML and return the file list.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`] when the XML is malformed.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_formats::parse_metalink;
+///
+/// let xml = r#"<?xml version="1.0"?>
+/// <metalink xmlns="urn:ietf:params:xml:ns:metalink">
+///   <file name="hello.txt">
+///     <url>http://example.com/hello.txt</url>
+///     <hash type="sha-256">abc</hash>
+///   </file>
+/// </metalink>"#;
+/// let files = parse_metalink(xml).unwrap();
+/// assert_eq!(files[0].name, "hello.txt");
+/// ```
 pub fn parse_metalink(xml: &str) -> Result<Vec<MetalinkFile>> {
     Ok(parse_metalink_doc(xml)?.files)
 }
 
+/// Parse Metalink 3/4 XML into files and metaurls.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`] when the XML is malformed.
 pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -267,15 +318,22 @@ fn local_attr_key(key: &[u8]) -> &[u8] {
     }
 }
 
+/// A parsed RFC 8288-ish HTTP `Link` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetalinkLink {
+    /// Link target (inside `<…>`).
     pub url: String,
+    /// `rel` parameter (lowercased).
     pub rel: String,
+    /// `type` parameter.
     pub media_type: Option<String>,
+    /// `pri` / `priority` parameter.
     pub pri: Option<i32>,
+    /// `digest` parameters decoded to [`MetalinkHash`].
     pub digests: Vec<MetalinkHash>,
 }
 
+/// Parse each `Link` header value with [`parse_link_header`].
 pub fn parse_link_headers(headers: &[String]) -> Vec<MetalinkLink> {
     let mut out = Vec::new();
     for h in headers {
@@ -284,6 +342,7 @@ pub fn parse_link_headers(headers: &[String]) -> Vec<MetalinkLink> {
     out
 }
 
+/// Parse one `Link` header (`describedby` / `duplicate` / digests).
 pub fn parse_link_header(header: &str) -> Vec<MetalinkLink> {
     let mut out = Vec::new();
     for part in split_link_values(header) {
@@ -381,6 +440,7 @@ fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
         .map_err(|_| ())
 }
 
+/// Encode hashes as `algo=hex,...`.
 pub fn encode_hashes(hashes: &[MetalinkHash]) -> String {
     hashes
         .iter()
@@ -389,6 +449,7 @@ pub fn encode_hashes(hashes: &[MetalinkHash]) -> String {
         .join(",")
 }
 
+/// Decode `algo=hex,...` into [`MetalinkHash`] values.
 pub fn decode_hashes(s: &str) -> Vec<MetalinkHash> {
     s.split(',')
         .filter_map(|part| {
@@ -515,5 +576,60 @@ mod tests {
         assert_eq!(links[1].pri, Some(1));
         assert_eq!(links[1].digests.len(), 1);
         assert_eq!(links[1].digests[0].algo, "sha-256");
+    }
+
+    #[test]
+    fn encode_decode_hashes_and_normalize() {
+        let hashes = vec![MetalinkHash {
+            algo: "sha-256".into(),
+            hex: "abc".into(),
+        }];
+        assert_eq!(encode_hashes(&hashes), "sha-256=abc");
+        let decoded = decode_hashes("sha256=aa,sha_256=bb,bad,foo=bar");
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].algo, "sha-256");
+        assert_eq!(decoded[0].hex, "aa");
+        assert_eq!(decoded[1].algo, "sha-256");
+        assert_eq!(decoded[2].algo, "foo");
+        assert_eq!(normalize_hash_algo("sha256"), "sha-256");
+        assert_eq!(normalize_hash_algo("SHA-1"), "sha-1");
+        assert_eq!(normalize_hash_algo("md5"), "md5");
+        assert_eq!(normalize_hash_algo("blake2"), "blake2");
+    }
+
+    #[test]
+    fn parse_metalink_rejects_bad_xml() {
+        let err = parse_metalink("<metalink><file").unwrap_err();
+        assert!(matches!(err, Error::Parse(_)));
+    }
+
+    #[test]
+    fn mediatype_link_headers_and_select_metaurl() {
+        assert!(is_metalink_mediatype(
+            "application/metalink4+xml; charset=utf-8"
+        ));
+        assert!(!is_metalink_mediatype("text/html"));
+        let links = parse_link_headers(&[
+            "<http://a.example/f.meta4>; rel=describedby; type=\"application/metalink4+xml\""
+                .into(),
+            "<http://b.example/f.bin>; rel=duplicate; pri=2".into(),
+        ]);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].rel, "describedby");
+        assert_eq!(links[1].rel, "duplicate");
+        let xml = r#"<?xml version="1.0"?>
+        <metalink xmlns="urn:ietf:params:xml:ns:metalink">
+          <metaurl mediatype="application/metalink4+xml">http://example.com/a.meta4</metaurl>
+          <metaurl mediatype="application/metalink4+xml">http://example.com/b.meta4</metaurl>
+        </metalink>"#;
+        let doc = parse_metalink_doc(xml).unwrap();
+        assert_eq!(
+            doc.select_metaurl(0).unwrap().url.as_str(),
+            "http://example.com/a.meta4"
+        );
+        assert_eq!(
+            doc.select_metaurl(-1).unwrap().url.as_str(),
+            "http://example.com/a.meta4"
+        );
     }
 }

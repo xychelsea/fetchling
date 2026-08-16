@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use fetchling_core::{Config, Result};
+
+#[cfg(doc)]
+use fetchling_core::Error;
 use percent_encoding::percent_decode_str;
 use url::Url;
 
@@ -19,6 +22,24 @@ fn use_directory_hierarchy(cfg: &Config) -> bool {
     cfg.recursive || cfg.page_requisites
 }
 
+/// Local destination for `url` under `cfg.directory_prefix`.
+///
+/// A one-shot download is a basename in the prefix. Recursive /
+/// page-requisites (or `-x` / `--force-directories`) build a host/path tree.
+/// `-O` / `--output-document` overrides the path.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+/// use fetchling_core::Config;
+/// use fetchling_engine::local_path_for_url;
+/// use url::Url;
+///
+/// let cfg = Config::default();
+/// let url = Url::parse("http://example.com/a/b.txt").unwrap();
+/// assert_eq!(local_path_for_url(&cfg, &url), PathBuf::from("./b.txt"));
+/// ```
 pub fn local_path_for_url(cfg: &Config, url: &Url) -> PathBuf {
     if let Some(out) = &cfg.output_document {
         return PathBuf::from(out);
@@ -111,6 +132,11 @@ fn sanitize_component(cfg: &Config, name: &str) -> String {
     out
 }
 
+/// Create parent directories of `path` when they are missing.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when a parent directory cannot be created.
 pub fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -125,10 +151,21 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
 pub enum DestAction {
     /// `--no-clobber`: do not retrieve.
     Skip,
+    /// Write to this path (overwrite, resume, or unique-names).
     Path(PathBuf),
 }
 
 /// First free path among `path`, `path.1`, `path.2`, ….
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use fetchling_engine::unique_path;
+///
+/// let p = Path::new("fetchling-engine-unique-missing.bin");
+/// assert_eq!(unique_path(p), p);
+/// ```
 pub fn unique_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -152,6 +189,18 @@ pub fn unique_path(path: &Path) -> PathBuf {
 ///
 /// Default: overwrite the preferred path. `--unique-names` is a
 /// fetchling extension that picks `path.1`, `path.2`, … instead.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use fetchling_core::Config;
+/// use fetchling_engine::{resolve_dest_path, DestAction};
+///
+/// let cfg = Config::default();
+/// let p = Path::new("fetchling-engine-resolve-missing.bin");
+/// assert_eq!(resolve_dest_path(&cfg, p), DestAction::Path(p.to_path_buf()));
+/// ```
 pub fn resolve_dest_path(cfg: &Config, preferred: &Path) -> DestAction {
     if cfg.output_document.is_some() {
         return DestAction::Path(preferred.to_path_buf());
@@ -168,11 +217,16 @@ pub fn resolve_dest_path(cfg: &Config, preferred: &Path) -> DestAction {
     DestAction::Path(preferred.to_path_buf())
 }
 
+/// Whether [`resolve_dest_path`] is [`DestAction::Skip`].
 pub fn should_skip_clobber(cfg: &Config, path: &Path) -> bool {
     matches!(resolve_dest_path(cfg, path), DestAction::Skip)
 }
 
 /// Rotate backups `.1` .. `.N` before overwrite when `cfg.backups > 0`.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when a backup cannot be rotated.
 pub fn rotate_backups(cfg: &Config, path: &Path) -> Result<()> {
     if cfg.backups == 0 || !path.exists() {
         return Ok(());
@@ -195,6 +249,10 @@ pub fn rotate_backups(cfg: &Config, path: &Path) -> Result<()> {
 /// Post-download rename for trust-server-names / Content-Disposition / -E.
 ///
 /// No-op when `-O` is set, dest is stdout, or status is 304.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when the file cannot be renamed.
 pub fn finalize_download_path(
     cfg: &Config,
     request_url: &Url,
@@ -529,6 +587,159 @@ mod tests {
         let out = finalize_download_path(&cfg, &start, &dest, &final_u, None, None, 200).unwrap();
         assert_eq!(out.file_name().unwrap(), "final.bin");
         assert!(out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_path_layout_cut_dirs_port_and_decode() {
+        let url = Url::parse("http://example.com:8080/a/b%20c.txt").unwrap();
+        let page_req = Config {
+            page_requisites: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            local_path_for_url(&page_req, &url),
+            PathBuf::from("./example.com:8080/a/b c.txt")
+        );
+        let cut = Config {
+            recursive: true,
+            cut_dirs: 1,
+            ..Config::default()
+        };
+        assert_eq!(
+            local_path_for_url(&cut, &url),
+            PathBuf::from("./example.com:8080/b c.txt")
+        );
+        let slash = Url::parse("http://example.com/dir/").unwrap();
+        let def = Config {
+            recursive: true,
+            default_page: "home.html".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            local_path_for_url(&def, &slash),
+            PathBuf::from("./example.com/dir/home.html")
+        );
+        let proto = Config {
+            recursive: true,
+            protocol_directories: true,
+            ..Config::default()
+        };
+        let simple = Url::parse("http://example.com/a/b.txt").unwrap();
+        assert_eq!(
+            local_path_for_url(&proto, &simple),
+            PathBuf::from("./http/example.com/a/b.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_unix_windows_ascii_and_case() {
+        let unix = Config {
+            restrict_file_names: vec!["unix".into()],
+            ..Config::default()
+        };
+        assert_eq!(sanitize_component(&unix, "a/b\nc"), "a_b_c");
+        let windows = Config {
+            restrict_file_names: vec!["windows".into()],
+            ..Config::default()
+        };
+        assert_eq!(sanitize_component(&windows, r#"a<>:"\|?*b"#), "a________b");
+        let ascii = Config {
+            restrict_file_names: vec!["ascii".into()],
+            ..Config::default()
+        };
+        assert_eq!(sanitize_component(&ascii, "café"), "caf_");
+        let lower = Config {
+            restrict_file_names: vec!["lowercase".into()],
+            ..Config::default()
+        };
+        assert_eq!(sanitize_component(&lower, "AbC"), "abc");
+        let upper = Config {
+            restrict_file_names: vec!["uppercase".into()],
+            ..Config::default()
+        };
+        assert_eq!(sanitize_component(&upper, "AbC"), "ABC");
+    }
+
+    #[test]
+    fn ensure_parent_creates_nested_and_ignores_basename() {
+        let dir =
+            std::env::temp_dir().join(format!("fetchling-engine-parent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested = dir.join("a").join("b").join("file.bin");
+        ensure_parent(&nested).unwrap();
+        assert!(dir.join("a").join("b").is_dir());
+        ensure_parent(Path::new("file.bin")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skip_clobber_and_rotate_backups() {
+        let dir =
+            std::env::temp_dir().join(format!("fetchling-engine-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.bin");
+        assert!(!should_skip_clobber(&Config::default(), &path));
+        std::fs::write(&path, b"a").unwrap();
+        assert!(!should_skip_clobber(&Config::default(), &path));
+        let skip = Config {
+            no_clobber: true,
+            ..Config::default()
+        };
+        assert!(should_skip_clobber(&skip, &path));
+        rotate_backups(&Config::default(), &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a");
+        std::fs::write(dir.join("doc.bin.1"), b"b").unwrap();
+        let two = Config {
+            backups: 2,
+            ..Config::default()
+        };
+        rotate_backups(&two, &path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(dir.join("doc.bin.1")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dir.join("doc.bin.2")).unwrap(), b"b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_noop_css_and_existing_html_ext() {
+        let url = Url::parse("http://example.com/x").unwrap();
+        let dash = PathBuf::from("-");
+        let cfg = Config {
+            adjust_extension: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            finalize_download_path(&cfg, &url, &dash, &url, Some("text/css"), None, 200).unwrap(),
+            dash
+        );
+        let dir = std::env::temp_dir().join(format!("fetchling-engine-fin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("page");
+        std::fs::write(&dest, b"x").unwrap();
+        assert_eq!(
+            finalize_download_path(&cfg, &url, &dest, &url, Some("text/html"), None, 304).unwrap(),
+            dest
+        );
+        let css = dir.join("style");
+        std::fs::write(&css, b"body{}").unwrap();
+        let out =
+            finalize_download_path(&cfg, &url, &css, &url, Some("text/css"), None, 200).unwrap();
+        assert_eq!(out, dir.join("style.css"));
+        let html = dir.join("index.html");
+        std::fs::write(&html, b"<html>").unwrap();
+        assert_eq!(
+            finalize_download_path(&cfg, &url, &html, &url, Some("text/html"), None, 200).unwrap(),
+            html
+        );
+        let htm = dir.join("index.htm");
+        std::fs::write(&htm, b"<html>").unwrap();
+        assert_eq!(
+            finalize_download_path(&cfg, &url, &htm, &url, Some("text/html"), None, 200).unwrap(),
+            htm
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

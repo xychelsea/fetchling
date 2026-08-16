@@ -2,6 +2,36 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use url::Url;
 
+/// Collect `http`/`https` URLs from RSS `<link>` text/href and `<enclosure url>`.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_formats::{extract_atom_urls, extract_rss_urls, extract_sitemap_urls};
+/// use url::Url;
+///
+/// let base = Url::parse("https://example.com/").unwrap();
+/// let rss = extract_rss_urls(
+///     &base,
+///     r#"<rss><channel><item>
+///          <link>https://example.com/post</link>
+///          <enclosure url="https://example.com/a.mp3"/>
+///        </item></channel></rss>"#,
+/// );
+/// assert!(rss.iter().any(|u| u.as_str() == "https://example.com/post"));
+///
+/// let atom = extract_atom_urls(
+///     &base,
+///     r#"<feed><entry><link href="https://example.com/e1"/></entry></feed>"#,
+/// );
+/// assert_eq!(atom[0].as_str(), "https://example.com/e1");
+///
+/// let sm = extract_sitemap_urls(
+///     &base,
+///     r#"<urlset><url><loc>https://example.com/page</loc></url></urlset>"#,
+/// );
+/// assert_eq!(sm[0].as_str(), "https://example.com/page");
+/// ```
 pub fn extract_rss_urls(base: &Url, xml: &str) -> Vec<Url> {
     let mut out = Vec::new();
     let mut reader = Reader::from_str(xml);
@@ -33,14 +63,12 @@ pub fn extract_rss_urls(base: &Url, xml: &str) -> Vec<Url> {
             Ok(Event::Text(t)) if in_link => {
                 text.push_str(&String::from_utf8_lossy(t.as_ref()));
             }
-            Ok(Event::End(e)) => {
-                if local_name_end(&e) == "link" {
-                    if !text.trim().is_empty() {
-                        push_http_url(base, text.trim(), &mut out);
-                    }
-                    in_link = false;
-                    text.clear();
+            Ok(Event::End(e)) if local_name_end(&e) == "link" => {
+                if !text.trim().is_empty() {
+                    push_http_url(base, text.trim(), &mut out);
                 }
+                in_link = false;
+                text.clear();
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -50,6 +78,7 @@ pub fn extract_rss_urls(base: &Url, xml: &str) -> Vec<Url> {
     dedup_urls(out)
 }
 
+/// Collect `http`/`https` URLs from Atom `<link href>`.
 pub fn extract_atom_urls(base: &Url, xml: &str) -> Vec<Url> {
     let mut out = Vec::new();
     let mut reader = Reader::from_str(xml);
@@ -58,15 +87,11 @@ pub fn extract_atom_urls(base: &Url, xml: &str) -> Vec<Url> {
     loop {
         buf.clear();
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if local_name(&e) == "link" {
-                    attr_url(base, &e, "href", &mut out);
-                }
+            Ok(Event::Start(e)) if local_name(&e) == "link" => {
+                attr_url(base, &e, "href", &mut out);
             }
-            Ok(Event::Empty(e)) => {
-                if local_name(&e) == "link" {
-                    attr_url(base, &e, "href", &mut out);
-                }
+            Ok(Event::Empty(e)) if local_name(&e) == "link" => {
+                attr_url(base, &e, "href", &mut out);
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -76,6 +101,7 @@ pub fn extract_atom_urls(base: &Url, xml: &str) -> Vec<Url> {
     dedup_urls(out)
 }
 
+/// Collect `http`/`https` URLs from sitemap `<loc>` text.
 pub fn extract_sitemap_urls(base: &Url, xml: &str) -> Vec<Url> {
     let mut out = Vec::new();
     let mut reader = Reader::from_str(xml);
@@ -86,23 +112,19 @@ pub fn extract_sitemap_urls(base: &Url, xml: &str) -> Vec<Url> {
     loop {
         buf.clear();
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if local_name(&e) == "loc" {
-                    in_loc = true;
-                    text.clear();
-                }
+            Ok(Event::Start(e)) if local_name(&e) == "loc" => {
+                in_loc = true;
+                text.clear();
             }
             Ok(Event::Text(t)) if in_loc => {
                 text.push_str(&String::from_utf8_lossy(t.as_ref()));
             }
-            Ok(Event::End(e)) => {
-                if local_name_end(&e) == "loc" {
-                    if !text.trim().is_empty() {
-                        push_http_url(base, text.trim(), &mut out);
-                    }
-                    in_loc = false;
-                    text.clear();
+            Ok(Event::End(e)) if local_name_end(&e) == "loc" => {
+                if !text.trim().is_empty() {
+                    push_http_url(base, text.trim(), &mut out);
                 }
+                in_loc = false;
+                text.clear();
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -198,5 +220,27 @@ mod tests {
         </urlset>"#;
         let urls = extract_sitemap_urls(&base, xml);
         assert_eq!(urls[0].as_str(), "https://example.com/page");
+    }
+
+    #[test]
+    fn rss_href_relative_and_sitemap_filters() {
+        let base = Url::parse("https://example.com/dir/").unwrap();
+        let rss = extract_rss_urls(
+            &base,
+            r#"<rss><channel><item><link href="post"/></item></channel></rss>"#,
+        );
+        assert!(rss
+            .iter()
+            .any(|u| u.as_str() == "https://example.com/dir/post"));
+        let sm = extract_sitemap_urls(
+            &base,
+            r#"<urlset>
+              <url><loc></loc></url>
+              <url><loc>ftp://ftp.example.com/a</loc></url>
+              <url><loc>https://example.com/ok</loc></url>
+            </urlset>"#,
+        );
+        assert_eq!(sm.len(), 1);
+        assert_eq!(sm[0].as_str(), "https://example.com/ok");
     }
 }
