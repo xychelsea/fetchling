@@ -1,3 +1,84 @@
+//! Recursive HTTP/FTP retrieval orchestration with robots, metalink, and path policy.
+//!
+//! # What this crate is (and is not)
+//!
+//! IS: an async job runner ([`Engine`]) that takes a filled [`Config`], queues
+//! URLs, retrieves over HTTP/HTTPS and FTP/FTPS (via `fetchling-http` /
+//! `fetchling-ftp`), applies concurrency limits, follows robots/sitemaps,
+//! extracts links for recursion, handles Metalink and WARC, and saves
+//! cookies/HSTS. Destination helpers ([`local_path_for_url`],
+//! [`resolve_dest_path`], [`DestAction`], [`unique_path`],
+//! [`should_skip_clobber`], [`rotate_backups`], [`finalize_download_path`],
+//! [`ensure_parent`]). The public API is flat at the crate root. Drive behavior
+//! with [`Config`] fields set directly; CLI / wget names in those field docs
+//! are compatibility aliases. [`Engine::run`] needs a Tokio runtime.
+//!
+//! IS NOT: CLI/argv parsing (`fetchling-cli`), an HTTP or FTP client
+//! implementation, or HTML/CSS/Metalink/WARC parsers (`fetchling-formats`).
+//! This crate does not re-export [`Config`], [`Error`], [`Logger`],
+//! [`ExitCode`], `HttpClient`, or `FtpClient`.
+//!
+//! # Typical integration
+//!
+//! 1. Start from [`Config::default`] and set `urls` plus retrieval fields
+//!    (`recursive`, `directory_prefix`, proxies, TLS, `continue_download`, …)
+//! 2. Create [`Engine::new`]
+//! 3. Call [`Engine::run`]
+//! 4. Optionally use destination helpers yourself without constructing [`Engine`]
+//!
+//! # Areas
+//!
+//! - **Engine** — [`Engine`]
+//! - **Destination** — [`DestAction`], [`local_path_for_url`], [`ensure_parent`],
+//!   [`unique_path`], [`resolve_dest_path`], [`should_skip_clobber`],
+//!   [`rotate_backups`], [`finalize_download_path`]
+//!
+//! # Examples
+//!
+//! Map a URL to a local path (no network):
+//!
+//! ```
+//! use std::path::PathBuf;
+//! use fetchling_core::Config;
+//! use fetchling_engine::local_path_for_url;
+//! use url::Url;
+//!
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let url = Url::parse("http://example.com/a/b.txt").unwrap();
+//! assert_eq!(local_path_for_url(&cfg, &url), PathBuf::from("./b.txt"));
+//! ```
+//!
+//! Construct an engine from default config (no network):
+//!
+//! ```
+//! use fetchling_core::Config;
+//! use fetchling_engine::Engine;
+//!
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! let engine = Engine::new(cfg).unwrap();
+//! let _ = engine;
+//! ```
+//!
+//! Run a retrieval (does not run; needs a server):
+//!
+//! ```no_run
+//! use fetchling_core::Config;
+//! use fetchling_engine::Engine;
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! let mut cfg = Config::default();
+//! cfg.quiet = true;
+//! cfg.urls = vec!["https://example.com/file.bin".into()];
+//! let code = Engine::new(cfg).unwrap().run().await.unwrap();
+//! let _ = code;
+//! # }
+//! ```
+
+#![warn(missing_docs)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,6 +112,10 @@ pub use fs::{
     should_skip_clobber, unique_path, DestAction,
 };
 
+/// Async retrieval job runner.
+///
+/// Owns a [`Config`] and [`Logger`]. HTTP/FTP clients, WARC, the URL queue, and
+/// worker tasks are constructed inside [`Self::run`].
 pub struct Engine {
     cfg: Config,
     log: Logger,
@@ -63,11 +148,30 @@ struct Shared {
 }
 
 impl Engine {
+    /// Build an engine from `cfg`.
+    ///
+    /// Creates a [`Logger`] from the same config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the logfile cannot be opened.
     pub fn new(cfg: Config) -> Result<Self> {
         let log = Logger::new(&cfg)?;
         Ok(Self { cfg, log })
     }
 
+    /// Run the retrieval to completion, consuming `self`.
+    ///
+    /// Seeds the queue from `cfg.urls`, input files, and metalink; retrieves
+    /// concurrently; follows robots and recursion; optionally converts links
+    /// and saves cookies/HSTS.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Parse`] when no URL is specified or `--base` is
+    /// invalid; [`Error::Auth`] on askpass failure; [`Error::Io`] on local
+    /// filesystem errors; plus retrieve failures ([`Error::Protocol`],
+    /// [`Error::Server`], [`Error::Network`], [`Error::Tls`]).
     pub async fn run(self) -> Result<ExitCode> {
         let mut cfg = self.cfg;
         askpass::maybe_prompt_password(&mut cfg)?;
@@ -1568,7 +1672,83 @@ fn warn_unimplemented_stubs(cfg: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn quiet_cfg() -> Config {
+        Config {
+            quiet: true,
+            netrc: false,
+            http_keep_alive: false,
+            ..Config::default()
+        }
+    }
+
+    fn test_shared(cfg: Config) -> Arc<Shared> {
+        let log = Logger::new(&cfg).unwrap();
+        let http = HttpClient::new(&cfg, log.clone()).unwrap();
+        Arc::new(Shared {
+            cfg,
+            log,
+            http,
+            ftp: FtpClient::default(),
+            warc: Mutex::new(None),
+            queue: Mutex::new(VecDeque::new()),
+            visited: Mutex::new(HashSet::new()),
+            link_map: Mutex::new(Vec::new()),
+            robots_cache: Mutex::new(HashMap::new()),
+            host_semaphores: Mutex::new(HashMap::new()),
+            path_locks: Mutex::new(HashMap::new()),
+            metalink_hashes: Mutex::new(HashMap::new()),
+            metalink_mirrors: Mutex::new(HashMap::new()),
+            sitemaps_seeded: Mutex::new(HashSet::new()),
+            downloaded: AtomicU64::new(0),
+            quota_reached: AtomicBool::new(false),
+            worst: Mutex::new(ExitCode::Success),
+        })
+    }
+
+    async fn spawn_http(replies: Vec<(u16, Vec<u8>)>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for (status, body) in replies {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = match stream.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let mut out = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                out.extend_from_slice(&body);
+                let _ = stream.write_all(&out).await;
+            }
+        });
+        addr
+    }
+
+    fn temp_dir(kind: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fetchling-engine-{kind}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn verify_sha256_mismatch_deletes_unless_keep() {
@@ -1887,5 +2067,401 @@ mod tests {
             seq == ["a", "a", "b", "b"] || seq == ["b", "b", "a", "a"],
             "unexpected interleaving: {seq:?}"
         );
+    }
+
+    #[test]
+    fn accept_url_filters_domains_dirs_and_regex() {
+        let url = Url::parse("http://www.example.com/pub/file.bin").unwrap();
+        let reject = Config {
+            reject: vec!["*.bin".into()],
+            ..Config::default()
+        };
+        assert!(!accept_url(&reject, &url));
+        let domains = Config {
+            domains: vec!["example.com".into()],
+            ..Config::default()
+        };
+        assert!(accept_url(&domains, &url));
+        assert!(!accept_url(
+            &domains,
+            &Url::parse("http://other.org/file.bin").unwrap()
+        ));
+        let exclude = Config {
+            exclude_domains: vec!["example.com".into()],
+            ..Config::default()
+        };
+        assert!(!accept_url(&exclude, &url));
+        let include = Config {
+            include_directories: vec!["/pub".into()],
+            ..Config::default()
+        };
+        assert!(accept_url(&include, &url));
+        assert!(!accept_url(
+            &include,
+            &Url::parse("http://www.example.com/other/file.bin").unwrap()
+        ));
+        let exclude_dir = Config {
+            exclude_directories: vec!["/pub".into()],
+            ..Config::default()
+        };
+        assert!(!accept_url(&exclude_dir, &url));
+        let case = Config {
+            accept: vec!["*.BIN".into()],
+            ignore_case: true,
+            ..Config::default()
+        };
+        assert!(accept_url(&case, &url));
+        let reject_re = Config {
+            regex_type: "posix".into(),
+            reject_regex: Some("file.+bin".into()),
+            ..Config::default()
+        };
+        assert!(!accept_url(
+            &reject_re,
+            &Url::parse("http://example.com/fileXbin").unwrap()
+        ));
+        let bad_pcre = Config {
+            regex_type: "pcre".into(),
+            accept_regex: Some("[".into()),
+            ..Config::default()
+        };
+        assert!(!accept_url(&bad_pcre, &url));
+        assert!(host_matches("www.example.com", "example.com"));
+        assert!(!host_matches("notexample.com", "example.com"));
+    }
+
+    #[test]
+    fn mime_and_metalink_content_type_edges() {
+        assert!(!mime_type_allowed(&["".into()], Some("text/html")));
+        assert!(!mime_type_allowed(&["text/html".into()], Some("  ")));
+        assert!(!is_metalink_content_type(None));
+        assert!(is_metalink_content_type(Some("application/metalink4+xml")));
+        assert!(!is_metalink_content_type(Some("text/html")));
+    }
+
+    #[test]
+    fn ftp_join_rejects_and_strips_file_parent() {
+        let base = Url::parse("ftp://example.com/pub/").unwrap();
+        assert!(ftp_join_child(&base, "", false).is_none());
+        assert!(ftp_join_child(&base, "ftp://x", false).is_none());
+        assert!(ftp_join_child(&base, "a/b", false).is_none());
+        assert_eq!(
+            ftp_join_name(&base, "a.bin").unwrap().as_str(),
+            ftp_join_child(&base, "a.bin", false).unwrap().as_str()
+        );
+        let file_base = Url::parse("ftp://example.com/pub/file").unwrap();
+        assert_eq!(
+            ftp_join_child(&file_base, "a.bin", false).unwrap().as_str(),
+            "ftp://example.com/pub/a.bin"
+        );
+    }
+
+    #[test]
+    fn child_path_and_symlink_dir_flag() {
+        let parent = Url::parse("http://example.com/a/").unwrap();
+        assert!(is_child_path(
+            &parent,
+            &Url::parse("http://example.com/a/b").unwrap()
+        ));
+        assert!(!is_child_path(
+            &parent,
+            &Url::parse("http://example.com/b").unwrap()
+        ));
+        assert!(symlink_target_is_dir(Some("docs/")));
+        assert!(!symlink_target_is_dir(None));
+        assert!(!symlink_target_is_dir(Some("a.bin")));
+    }
+
+    #[test]
+    fn ingest_metalink_xml_urls_hashes_mirrors_and_index() {
+        let xml = r#"<?xml version="1.0"?>
+        <metalink xmlns="urn:ietf:params:xml:ns:metalink">
+          <file name="f.bin">
+            <url>http://a.example.com/f.bin</url>
+            <url>http://b.example.com/f.bin</url>
+            <hash type="sha-256">abc</hash>
+          </file>
+          <metaurl mediatype="application/metalink4+xml">http://example.com/a.meta4</metaurl>
+          <metaurl mediatype="application/metalink4+xml">http://example.com/b.meta4</metaurl>
+        </metalink>"#;
+        let mut urls = Vec::new();
+        let mut hashes = HashMap::new();
+        let mut mirrors = HashMap::new();
+        ingest_metalink_xml(
+            xml,
+            &Config::default(),
+            &mut urls,
+            &mut hashes,
+            &mut mirrors,
+        )
+        .unwrap();
+        assert_eq!(urls, vec!["http://a.example.com/f.bin".to_string()]);
+        assert_eq!(
+            hashes.get("http://a.example.com/f.bin").map(String::as_str),
+            Some("sha-256=abc")
+        );
+        assert_eq!(
+            hashes.get("http://b.example.com/f.bin").map(String::as_str),
+            Some("sha-256=abc")
+        );
+        assert_eq!(
+            mirrors
+                .get("http://a.example.com/f.bin")
+                .map(|v| v.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>()),
+            Some(vec!["http://b.example.com/f.bin".to_string()])
+        );
+        let idx = Config {
+            metalink_index: 2,
+            ..Config::default()
+        };
+        let mut urls = Vec::new();
+        ingest_metalink_xml(
+            xml,
+            &idx,
+            &mut urls,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(urls, vec!["http://example.com/b.meta4".to_string()]);
+        let bad = Config {
+            metalink_index: 9,
+            ..Config::default()
+        };
+        let err = ingest_metalink_xml(
+            xml,
+            &bad,
+            &mut Vec::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Parse(_)));
+    }
+
+    #[test]
+    fn verify_keep_badhash_unknown_algo_and_sha512() {
+        let dir = temp_dir("hash");
+        let path = dir.join("hello.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let err = verify_metalink_hashes(&path, "00", true).unwrap_err();
+        assert!(err.to_string().contains("mismatch"));
+        assert!(path.exists());
+        verify_metalink_hashes(&path, "blake2=abc", false).unwrap();
+        verify_metalink_hashes(
+            &path,
+            "sha-512=9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043",
+            false,
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn engine_run_parse_errors_without_network() {
+        let cfg = quiet_cfg();
+        let err = Engine::new(cfg).unwrap().run().await.unwrap_err();
+        assert!(matches!(err, Error::Parse(msg) if msg.contains("no URL specified")));
+        let mut cfg = quiet_cfg();
+        cfg.base = Some("not a url".into());
+        cfg.urls = vec!["http://example.com/x".into()];
+        let err = Engine::new(cfg).unwrap().run().await.unwrap_err();
+        assert!(matches!(err, Error::Parse(msg) if msg.contains("bad --base")));
+    }
+
+    #[tokio::test]
+    async fn engine_run_saves_200_body() {
+        let addr = spawn_http(vec![(200, b"hello".to_vec())]).await;
+        let dir = temp_dir("run200");
+        let mut cfg = quiet_cfg();
+        cfg.directory_prefix = dir.display().to_string();
+        cfg.urls = vec![format!("http://{addr}/file.bin")];
+        let code = Engine::new(cfg).unwrap().run().await.unwrap();
+        assert_eq!(code, ExitCode::Success);
+        assert_eq!(std::fs::read(dir.join("file.bin")).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn engine_run_robots_deny_skips_page() {
+        let addr = spawn_http(vec![(200, b"User-agent: *\nDisallow: /\n".to_vec())]).await;
+        let dir = temp_dir("robots");
+        let mut cfg = quiet_cfg();
+        cfg.recursive = true;
+        cfg.directory_prefix = dir.display().to_string();
+        cfg.urls = vec![format!("http://{addr}/page.bin")];
+        let code = Engine::new(cfg).unwrap().run().await.unwrap();
+        assert_eq!(code, ExitCode::Success);
+        let dest = local_path_for_url(
+            &Config {
+                recursive: true,
+                directory_prefix: dir.display().to_string(),
+                ..Config::default()
+            },
+            &Url::parse(&format!("http://{addr}/page.bin")).unwrap(),
+        );
+        assert!(!dest.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn apply_and_enqueue_metalink() {
+        let base = Url::parse("http://example.com/dir/file.bin").unwrap();
+        let described = test_shared(quiet_cfg());
+        apply_metalink_links(
+            &described,
+            &base,
+            &["<f.meta4>; rel=describedby; type=\"application/metalink4+xml\"".into()],
+        )
+        .await
+        .unwrap();
+        let q = described.queue.lock().await;
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0.as_str(), "http://example.com/dir/f.meta4");
+        drop(q);
+
+        let dup = test_shared(quiet_cfg());
+        apply_metalink_links(
+            &dup,
+            &base,
+            &[
+                "<http://mirror.example.com/f.bin>; rel=duplicate; pri=1; digest=SHA-256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                "<http://other.example.com/f.bin>; rel=duplicate; pri=2".into(),
+            ],
+        )
+        .await
+        .unwrap();
+        let q = dup.queue.lock().await;
+        assert_eq!(q[0].0.as_str(), "http://mirror.example.com/f.bin");
+        drop(q);
+        let mirrors = dup.metalink_mirrors.lock().await;
+        assert_eq!(
+            mirrors
+                .get("http://mirror.example.com/f.bin")
+                .map(|v| v.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>()),
+            Some(vec!["http://other.example.com/f.bin".to_string()])
+        );
+        drop(mirrors);
+        let hashes = dup.metalink_hashes.lock().await;
+        assert_eq!(
+            hashes
+                .get("http://mirror.example.com/f.bin")
+                .map(String::as_str),
+            Some("sha-256=0000000000000000000000000000000000000000000000000000000000000000")
+        );
+
+        let dir = temp_dir("metafile");
+        let path = dir.join("f.meta4");
+        std::fs::write(
+            &path,
+            r#"<?xml version="1.0"?>
+        <metalink xmlns="urn:ietf:params:xml:ns:metalink">
+          <file name="f.bin">
+            <url>http://a.example.com/f.bin</url>
+            <url>http://b.example.com/f.bin</url>
+            <hash type="sha-256">abc</hash>
+          </file>
+        </metalink>"#,
+        )
+        .unwrap();
+        let shared = test_shared(quiet_cfg());
+        enqueue_metalink_file(&shared, &path).await.unwrap();
+        let q = shared.queue.lock().await;
+        assert_eq!(q[0].0.as_str(), "http://a.example.com/f.bin");
+        drop(q);
+        assert_eq!(
+            shared
+                .metalink_hashes
+                .lock()
+                .await
+                .get("http://b.example.com/f.bin")
+                .map(String::as_str),
+            Some("sha-256=abc")
+        );
+        assert_eq!(
+            shared
+                .metalink_mirrors
+                .lock()
+                .await
+                .get("http://a.example.com/f.bin")
+                .map(|v| v.len()),
+            Some(1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ftp_child_allowed_and_log_reject() {
+        let mut https = quiet_cfg();
+        https.https_only = true;
+        let shared = test_shared(https);
+        let base = Url::parse("ftp://example.com/pub/").unwrap();
+        let child = Url::parse("ftp://example.com/pub/a.bin").unwrap();
+        assert!(!ftp_child_allowed(&shared, &base, &child));
+
+        let mut noparent = quiet_cfg();
+        noparent.no_parent = true;
+        let shared = test_shared(noparent);
+        let dir_base = Url::parse("http://example.com/a/").unwrap();
+        assert!(!ftp_child_allowed(
+            &shared,
+            &dir_base,
+            &Url::parse("http://example.com/b").unwrap()
+        ));
+        assert!(ftp_child_allowed(
+            &shared,
+            &dir_base,
+            &Url::parse("http://example.com/a/c").unwrap()
+        ));
+
+        let dir = temp_dir("reject");
+        let log_path = dir.join("rejected.log");
+        let mut cfg = quiet_cfg();
+        cfg.rejected_log = Some(log_path.display().to_string());
+        let shared = test_shared(cfg);
+        let url = Url::parse("http://example.com/x").unwrap();
+        log_reject(&shared, &url, "robots.txt");
+        let body = std::fs::read_to_string(&log_path).unwrap();
+        assert!(body.contains("robots.txt,http://example.com/x,"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ftp_listing_creates_local_symlink() {
+        let dir = temp_dir("ftplink");
+        let base = Url::parse("ftp://example.com/pub/").unwrap();
+        let entries = vec![
+            FtpEntry {
+                name: "link.bin".into(),
+                kind: FtpEntryKind::Symlink {
+                    target: Some("a.bin".into()),
+                },
+            },
+            FtpEntry {
+                name: "../escape".into(),
+                kind: FtpEntryKind::Symlink {
+                    target: Some("a.bin".into()),
+                },
+            },
+            FtpEntry {
+                name: "skip".into(),
+                kind: FtpEntryKind::Other,
+            },
+        ];
+        let cfg = Config {
+            retr_symlinks: false,
+            quiet: true,
+            netrc: false,
+            ..Config::default()
+        };
+        let shared = test_shared(cfg);
+        enqueue_ftp_listing_entries(&shared, &base, &dir, &entries, 0).await;
+        assert!(shared.queue.lock().await.is_empty());
+        let dest = dir.join("link.bin");
+        let meta = std::fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert!(!dir.join("escape").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

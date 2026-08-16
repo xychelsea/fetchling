@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "fetchling-engine for fetchling"
+readme = "README.md"
+description = "Recursive HTTP/FTP retrieval orchestration with robots, metalink, and destination path policy for building a network retriever"
+keywords = ["download", "recursive", "crawl", "http", "fetchling"]
+categories = ["network-programming"]
 
 [dependencies]
 fetchling-core = { workspace = true }

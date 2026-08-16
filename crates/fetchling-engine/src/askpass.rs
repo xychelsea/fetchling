@@ -174,4 +174,54 @@ mod tests {
         maybe_prompt_password(&mut cfg).unwrap();
         assert!(cfg.password.is_none());
     }
+
+    #[test]
+    fn skips_when_http_or_ftp_password_set() {
+        let mut http = Config {
+            ask_password: true,
+            http_password: Some("h".into()),
+            ..Config::default()
+        };
+        maybe_prompt_password(&mut http).unwrap();
+        assert!(http.password.is_none());
+        let mut ftp = Config {
+            ask_password: true,
+            ftp_password: Some("f".into()),
+            ..Config::default()
+        };
+        maybe_prompt_password(&mut ftp).unwrap();
+        assert!(ftp.password.is_none());
+    }
+
+    #[test]
+    fn askpass_missing_and_nonzero_are_auth_errors() {
+        let mut missing = Config {
+            use_askpass: Some(format!(
+                "/nonexistent/fetchling-askpass-missing-{}",
+                std::process::id()
+            )),
+            ..Config::default()
+        };
+        let err = maybe_prompt_password(&mut missing).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)));
+        let dir =
+            std::env::temp_dir().join(format!("fetchling-askpass-fail-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("askpass");
+        std::fs::write(&path, b"#!/usr/bin/env sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        let mut cfg = Config {
+            use_askpass: Some(path.display().to_string()),
+            ..Config::default()
+        };
+        let err = maybe_prompt_password(&mut cfg).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
