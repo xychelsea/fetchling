@@ -1,13 +1,32 @@
 use regex::Regex;
 use url::Url;
 
+/// Tag filters and comment stripping for [`extract_html_urls`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HtmlExtractOpts<'a> {
+    /// Tag names to keep. Empty means follow every tag.
     pub follow_tags: &'a [String],
+    /// Tag names to skip (checked after `follow_tags`).
     pub ignore_tags: &'a [String],
+    /// Strip `<!-- … -->` comments before scanning.
     pub strict_comments: bool,
 }
 
+/// Collect `http`/`https`/`ftp` URLs from HTML `href`/`src`/`action`/`data`.
+///
+/// Relative values are joined against `base`. Fragments (`#…`) and
+/// `javascript:` URLs are skipped. Results are sorted and deduplicated.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_formats::{extract_html_urls, HtmlExtractOpts};
+/// use url::Url;
+///
+/// let base = Url::parse("https://example.com/dir/").unwrap();
+/// let urls = extract_html_urls(&base, r#"<a href="x.html">"#, HtmlExtractOpts::default());
+/// assert_eq!(urls[0].as_str(), "https://example.com/dir/x.html");
+/// ```
 pub fn extract_html_urls(base: &Url, html: &str, opts: HtmlExtractOpts<'_>) -> Vec<Url> {
     let html = if opts.strict_comments {
         strip_html_comments(html)
@@ -69,6 +88,21 @@ fn strip_html_comments(html: &str) -> String {
     re.replace_all(html, "").into_owned()
 }
 
+/// Collect `http`/`https`/`ftp` URLs from CSS `url(...)`.
+///
+/// Relative values are joined against `base`. Results are sorted and
+/// deduplicated.
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_formats::extract_css_urls;
+/// use url::Url;
+///
+/// let base = Url::parse("https://example.com/").unwrap();
+/// let urls = extract_css_urls(&base, r#"url(https://example.com/a.png)"#);
+/// assert_eq!(urls[0].as_str(), "https://example.com/a.png");
+/// ```
 pub fn extract_css_urls(base: &Url, css: &str) -> Vec<Url> {
     let mut out = Vec::new();
     let re = Regex::new(r#"url\(\s*['"]?([^'")\s]+)['"]?\s*\)"#).expect("regex");
@@ -89,6 +123,20 @@ pub fn extract_css_urls(base: &Url, css: &str) -> Vec<Url> {
 ///
 /// When `file_only` is true, only the last path segment of each URL is replaced
 /// with the local basename (`--convert-file-only`).
+///
+/// # Examples
+///
+/// ```
+/// use fetchling_formats::convert_links;
+///
+/// let html = r#"<a href="https://example.com/a/b.html">"#;
+/// let map = [(
+///     "https://example.com/a/b.html".into(),
+///     "./example.com/a/b.html".into(),
+/// )];
+/// let out = convert_links(html, &map, false);
+/// assert!(out.contains("./example.com/a/b.html"));
+/// ```
 pub fn convert_links(html: &str, mapping: &[(String, String)], file_only: bool) -> String {
     let mut out = html.to_string();
     for (from, to) in mapping {
@@ -212,5 +260,47 @@ mod tests {
         let map = [("https://example.com/dir/page".into(), "./saved.html".into())];
         let out = convert_links(html, &map, true);
         assert_eq!(out, r#"href="saved.html""#);
+    }
+
+    #[test]
+    fn extract_html_urls_schemes_and_attrs() {
+        let base = Url::parse("https://example.com/dir/").unwrap();
+        let html = r##"
+            <a href="#frag"></a>
+            <a href="javascript:void(0)"></a>
+            <a href="mailto:a@example.com"></a>
+            <a href='ftp://ftp.example.com/f.bin'></a>
+            <img src="pic.png">
+            <form action="go"></form>
+            <object data="https://cdn.example.com/x.bin"></object>
+        "##;
+        let urls = extract_html_urls(&base, html, HtmlExtractOpts::default());
+        let s: Vec<_> = urls.iter().map(|u| u.as_str()).collect();
+        assert!(s.contains(&"ftp://ftp.example.com/f.bin"));
+        assert!(s.iter().any(|u| u.ends_with("pic.png")));
+        assert!(s.iter().any(|u| u.ends_with("/dir/go")));
+        assert!(s.contains(&"https://cdn.example.com/x.bin"));
+        assert!(!s.iter().any(|u| u.contains("javascript:")
+            || u.contains("mailto:")
+            || *u == "https://example.com/dir/#frag"));
+    }
+
+    #[test]
+    fn extract_css_and_convert_edges() {
+        let base = Url::parse("https://example.com/dir/").unwrap();
+        let urls = extract_css_urls(&base, "url('https://example.com/a.png') url(b.png)");
+        assert!(urls
+            .iter()
+            .any(|u| u.as_str() == "https://example.com/a.png"));
+        assert!(urls
+            .iter()
+            .any(|u| u.as_str() == "https://example.com/dir/b.png"));
+        assert_eq!(convert_links("hello", &[], false), "hello");
+        let html = r#"href="page""#;
+        let map = [(
+            "https://example.com/dir/page?q=1#frag".into(),
+            "./saved.html".into(),
+        )];
+        assert_eq!(convert_links(html, &map, true), r#"href="saved.html""#);
     }
 }

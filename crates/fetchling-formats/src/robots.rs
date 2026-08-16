@@ -2,20 +2,41 @@ use std::collections::HashMap;
 
 use url::Url;
 
+/// robots.txt subset: `User-agent`, `Disallow`, and `Sitemap`.
+///
+/// `Allow` rules are ignored. Comments (`#`) are stripped.
 #[derive(Debug, Default, Clone)]
 pub struct Robots {
     /// user-agent -> disallowed path prefixes
     rules: HashMap<String, Vec<String>>,
+    /// `Sitemap:` values collected while parsing.
     pub sitemaps: Vec<String>,
 }
 
 impl Robots {
+    /// Disallow every path for every user-agent.
     pub fn deny_all() -> Self {
         let mut robots = Self::default();
         robots.rules.insert("*".into(), vec!["/".into()]);
         robots
     }
 
+    /// Parse a robots.txt body.
+    ///
+    /// `Disallow` prefixes apply to the current `User-agent` list (`*` if none
+    /// was seen). Empty `Disallow` values are stored but ignored by
+    /// [`Self::allows`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fetchling_formats::Robots;
+    /// use url::Url;
+    ///
+    /// let r = Robots::parse("User-agent: *\nDisallow: /private\n");
+    /// assert!(!r.allows("fetchling", &Url::parse("http://ex/private/a").unwrap()));
+    /// assert!(r.allows("fetchling", &Url::parse("http://ex/public").unwrap()));
+    /// ```
     pub fn parse(body: &str) -> Self {
         let mut robots = Self::default();
         let mut current_agents: Vec<String> = Vec::new();
@@ -50,6 +71,10 @@ impl Robots {
         robots
     }
 
+    /// Whether `user_agent` may fetch `url`'s path.
+    ///
+    /// Uses the agent-specific `Disallow` list, or `*` when that agent has no
+    /// rules. A path is denied when it starts with a stored prefix.
     pub fn allows(&self, user_agent: &str, url: &Url) -> bool {
         let ua = user_agent.to_ascii_lowercase();
         let path = url.path();
@@ -98,5 +123,17 @@ mod tests {
         );
         assert_eq!(r.sitemaps.len(), 2);
         assert_eq!(r.sitemaps[0], "https://example.com/sitemap.xml");
+    }
+
+    #[test]
+    fn parse_comments_empty_disallow_and_allow() {
+        let r = Robots::parse(
+            "# Disallow: /\nUser-agent: *\nDisallow:\nAllow: /private\nDisallow: /private\n",
+        );
+        assert!(r.allows("fetchling", &Url::parse("http://ex/").unwrap()));
+        assert!(!r.allows("fetchling", &Url::parse("http://ex/private").unwrap()));
+        let r = Robots::parse("Disallow: /hidden\n");
+        assert!(!r.allows("fetchling", &Url::parse("http://ex/hidden").unwrap()));
+        assert!(r.allows("fetchling", &Url::parse("http://ex/ok").unwrap()));
     }
 }

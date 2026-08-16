@@ -9,6 +9,11 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha1::{Digest, Sha1};
 
+/// WARC 1.0 writer.
+///
+/// Writes warcinfo, request/response/resource/revisit records, optional gzip,
+/// block/payload digests, a CDX sidecar, max-size rotation, and CDX-based
+/// dedup.
 pub struct WarcWriter {
     path: PathBuf,
     base_path: PathBuf,
@@ -23,13 +28,27 @@ pub struct WarcWriter {
     dedup: HashSet<String>,
 }
 
+/// Outcome of [`WarcWriter::write_response`].
 pub struct WarcWriteInfo {
+    /// Byte offset of the record in the current WARC file.
     pub offset: u64,
+    /// Block digest when digests are enabled.
     pub digest: Option<String>,
+    /// True when a matching digest was already in the dedup set (revisit).
     pub skipped_dedup: bool,
 }
 
 impl WarcWriter {
+    /// Open a WARC file from `cfg`.
+    ///
+    /// Returns `Ok(None)` when [`Config::warc_file`] is unset. Uses
+    /// [`Config::warc_cdx`], [`Config::warc_digests`],
+    /// [`Config::warc_compression`], [`Config::warc_max_size`],
+    /// [`Config::warc_dedup`], and [`Config::warc_header`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the WARC or CDX file cannot be created.
     pub fn open(cfg: &Config) -> Result<Option<Self>> {
         let Some(path) = &cfg.warc_file else {
             return Ok(None);
@@ -143,6 +162,14 @@ impl WarcWriter {
         Ok(())
     }
 
+    /// Write an HTTP response (or revisit when the digest hits the dedup set).
+    ///
+    /// `http_headers_and_body` is the raw HTTP message. Returns
+    /// [`WarcWriteInfo`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the record cannot be appended.
     pub fn write_response(
         &mut self,
         target_uri: &str,
@@ -206,6 +233,13 @@ impl WarcWriter {
         })
     }
 
+    /// Write an HTTP request record.
+    ///
+    /// Returns the `WARC-Record-ID`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the record cannot be appended.
     pub fn write_request(
         &mut self,
         target_uri: &str,
@@ -235,6 +269,11 @@ impl WarcWriter {
         })
     }
 
+    /// Write a non-HTTP `resource` record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the record cannot be appended.
     pub fn write_resource(&mut self, target_uri: &str, body: &[u8]) -> Result<()> {
         let block_digest = if self.digests {
             Some(sha1_digest(body))
@@ -295,10 +334,12 @@ impl WarcWriter {
         Ok(id)
     }
 
+    /// Current WARC path (after rotation, if any).
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// CDX sidecar path when [`Config::warc_cdx`] was set.
     pub fn cdx_path(&self) -> Option<&Path> {
         self.cdx_path.as_deref()
     }
@@ -437,6 +478,7 @@ fn simple_uuid() -> String {
 mod tests {
     use super::*;
     use fetchling_core::Config;
+    use std::io::Read;
 
     #[test]
     fn unix_epoch_date() {
@@ -628,6 +670,43 @@ mod tests {
         let data = std::fs::read_to_string(&path).unwrap();
         assert!(data.contains("WARC-Type: resource"));
         assert!(data.contains("log line"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_none_without_warc_file() {
+        let cfg = Config {
+            warc_file: None,
+            ..Config::default()
+        };
+        assert!(WarcWriter::open(&cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn gzip_write_and_cdx_path() {
+        let dir = std::env::temp_dir().join(format!("fetchling-warc-gz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cap.warc.gz");
+        let cfg = Config {
+            warc_file: Some(path.display().to_string()),
+            warc_compression: true,
+            warc_cdx: true,
+            ..Config::default()
+        };
+        let mut w = WarcWriter::open(&cfg).unwrap().unwrap();
+        assert!(w.cdx_path().is_some());
+        w.write_resource("metadata://fetchling/log", b"gz-body\n")
+            .unwrap();
+        drop(w);
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..2], [0x1f, 0x8b]);
+        let mut text = String::new();
+        flate2::read::MultiGzDecoder::new(raw.as_slice())
+            .read_to_string(&mut text)
+            .unwrap();
+        assert!(text.contains("WARC-Type: resource"));
+        assert!(text.contains("gz-body"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
