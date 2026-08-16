@@ -30,4 +30,6 @@ xattr = { workspace = true }
 nix = { version = "0.29", default-features = false, features = ["term"] }
 
 [dev-dependencies]
+fetchling-core = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
