@@ -188,14 +188,14 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 let local = name.rsplit(':').next().unwrap_or(&name);
                 match local {
                     "file" => {
                         let mut fname = String::new();
                         for a in e.attributes().flatten() {
-                            if local_attr_key(a.key.as_ref()) == b"name" {
-                                fname = String::from_utf8_lossy(&a.value).to_string();
+                            if local_attr_key(a.key.as_ref()) == "name" {
+                                fname = a.value.to_string();
                             }
                         }
                         current = Some(MetalinkFile {
@@ -210,11 +210,10 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
                         pending_preference = None;
                         for a in e.attributes().flatten() {
                             let key = local_attr_key(a.key.as_ref());
-                            if key == b"location" {
-                                pending_location =
-                                    Some(String::from_utf8_lossy(&a.value).to_string());
-                            } else if key == b"preference" || key == b"priority" {
-                                pending_preference = String::from_utf8_lossy(&a.value).parse().ok();
+                            if key == "location" {
+                                pending_location = Some(a.value.to_string());
+                            } else if key == "preference" || key == "priority" {
+                                pending_preference = a.value.parse().ok();
                             }
                         }
                     }
@@ -222,8 +221,8 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
                         in_hash = true;
                         hash_type.clear();
                         for a in e.attributes().flatten() {
-                            if local_attr_key(a.key.as_ref()) == b"type" {
-                                hash_type = String::from_utf8_lossy(&a.value).to_string();
+                            if local_attr_key(a.key.as_ref()) == "type" {
+                                hash_type = a.value.to_string();
                             }
                         }
                     }
@@ -233,11 +232,10 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
                         meta_priority = None;
                         for a in e.attributes().flatten() {
                             let key = local_attr_key(a.key.as_ref());
-                            if key == b"mediatype" || key == b"type" {
-                                meta_mediatype =
-                                    Some(String::from_utf8_lossy(&a.value).to_string());
-                            } else if key == b"priority" || key == b"preference" {
-                                meta_priority = String::from_utf8_lossy(&a.value).parse().ok();
+                            if key == "mediatype" || key == "type" {
+                                meta_mediatype = Some(a.value.to_string());
+                            } else if key == "priority" || key == "preference" {
+                                meta_priority = a.value.parse().ok();
                             }
                         }
                     }
@@ -245,7 +243,7 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
                 }
             }
             Ok(Event::Text(t)) => {
-                let text = t.xml10_content().unwrap_or_default().to_string();
+                let text = t.xml10_content().to_string();
                 if in_url {
                     if let Some(f) = current.as_mut() {
                         if let Ok(u) = Url::parse(&text) {
@@ -279,7 +277,7 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
                 }
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 let local = name.rsplit(':').next().unwrap_or(&name);
                 match local {
                     "file" => {
@@ -310,12 +308,8 @@ pub fn parse_metalink_doc(xml: &str) -> Result<MetalinkDoc> {
     Ok(doc)
 }
 
-fn local_attr_key(key: &[u8]) -> &[u8] {
-    if let Some(i) = key.iter().rposition(|b| *b == b':') {
-        &key[i + 1..]
-    } else {
-        key
-    }
+fn local_attr_key(key: &str) -> &str {
+    key.rsplit(':').next().unwrap_or(key)
 }
 
 /// A parsed RFC 8288-ish HTTP `Link` value.

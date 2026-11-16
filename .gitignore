@@ -4,6 +4,7 @@
 *.swo
 *~
 .DS_Store
+.CLAUDE.md
 .idea/
 .vscode/
 *.log

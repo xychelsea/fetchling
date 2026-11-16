@@ -61,7 +61,7 @@ pub fn extract_rss_urls(base: &Url, xml: &str) -> Vec<Url> {
                 }
             }
             Ok(Event::Text(t)) if in_link => {
-                text.push_str(&String::from_utf8_lossy(t.as_ref()));
+                text.push_str(&t);
             }
             Ok(Event::End(e)) if local_name_end(&e) == "link" => {
                 if !text.trim().is_empty() {
@@ -117,7 +117,7 @@ pub fn extract_sitemap_urls(base: &Url, xml: &str) -> Vec<Url> {
                 text.clear();
             }
             Ok(Event::Text(t)) if in_loc => {
-                text.push_str(&String::from_utf8_lossy(t.as_ref()));
+                text.push_str(&t);
             }
             Ok(Event::End(e)) if local_name_end(&e) == "loc" => {
                 if !text.trim().is_empty() {
@@ -135,20 +135,18 @@ pub fn extract_sitemap_urls(base: &Url, xml: &str) -> Vec<Url> {
 }
 
 fn local_name(e: &quick_xml::events::BytesStart<'_>) -> String {
-    String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase()
+    e.local_name().as_ref().to_ascii_lowercase()
 }
 
 fn local_name_end(e: &quick_xml::events::BytesEnd<'_>) -> String {
-    String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase()
+    e.local_name().as_ref().to_ascii_lowercase()
 }
 
 fn attr_url(base: &Url, e: &quick_xml::events::BytesStart<'_>, key: &str, out: &mut Vec<Url>) {
     for a in e.attributes().flatten() {
-        let k = String::from_utf8_lossy(a.key.local_name().as_ref()).to_ascii_lowercase();
+        let k = a.key.local_name().as_ref().to_ascii_lowercase();
         if k == key {
-            if let Ok(v) = String::from_utf8(a.value.into_owned()) {
-                push_http_url(base, &v, out);
-            }
+            push_http_url(base, &a.value, out);
         }
     }
 }
