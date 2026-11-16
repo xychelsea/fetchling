@@ -12,20 +12,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xychelsea/fetchling"
 rust-version = "1.88"
 
 [workspace.dependencies]
-fetchling-core = { path = "crates/fetchling-core", version = "0.1.2" }
-fetchling-cli = { path = "crates/fetchling-cli", version = "0.1.2" }
-fetchling-net = { path = "crates/fetchling-net", version = "0.1.2" }
-fetchling-http = { path = "crates/fetchling-http", version = "0.1.2" }
-fetchling-ftp = { path = "crates/fetchling-ftp", version = "0.1.2" }
-fetchling-formats = { path = "crates/fetchling-formats", version = "0.1.2" }
-fetchling-engine = { path = "crates/fetchling-engine", version = "0.1.2" }
+fetchling-core = { path = "crates/fetchling-core", version = "0.1.3" }
+fetchling-cli = { path = "crates/fetchling-cli", version = "0.1.3" }
+fetchling-net = { path = "crates/fetchling-net", version = "0.1.3" }
+fetchling-http = { path = "crates/fetchling-http", version = "0.1.3" }
+fetchling-ftp = { path = "crates/fetchling-ftp", version = "0.1.3" }
+fetchling-formats = { path = "crates/fetchling-formats", version = "0.1.3" }
+fetchling-engine = { path = "crates/fetchling-engine", version = "0.1.3" }
 thiserror = "2"
 url = "2"
 http = "1"
