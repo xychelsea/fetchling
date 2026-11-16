@@ -1233,11 +1233,7 @@ fn accept_url(cfg: &Config, url: &Url) -> bool {
             return false;
         }
     }
-    if cfg.exclude_directories.iter().any(|d| path.starts_with(d)) {
-        return false;
-    }
-
-    true
+    !cfg.exclude_directories.iter().any(|d| path.starts_with(d))
 }
 
 fn regex_is_match(cfg: &Config, pattern: &str, hay: &str) -> bool {

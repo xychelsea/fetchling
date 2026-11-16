@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
+rust-version.workspace = true
 readme = "README.md"
 description = "DNS, TCP, TLS, HTTP-proxy, and rate-limiting primitives for building a network retriever"
 keywords = ["dns", "tls", "proxy", "download", "fetchling"]
@@ -19,6 +19,5 @@ tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
 hickory-resolver = { workspace = true }
 sha2 = { workspace = true }
-hex = { workspace = true }
 base64 = { workspace = true }
-x509-parser = "0.18"
+x509-parser = { workspace = true }

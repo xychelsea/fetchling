@@ -53,7 +53,7 @@ Download a prebuilt Linux x86_64 binary from the [Releases](https://github.com/x
 
 ### Build from source
 
-`fetchling` requires Rust 1.75 or later.
+`fetchling` requires Rust 1.88 or later (the `rust-version` in `Cargo.toml`; checked in CI).
 
 ```console
 git clone https://github.com/xychelsea/fetchling.git
@@ -791,7 +791,7 @@ Integrity checks passed for every scenario. The multi-URL case is not an apples-
 The repository uses `cargo-deny` for dependency checks:
 
 ```console
-cargo deny check --all-features
+cargo deny --all-features check
 ```
 
 The GitHub Actions workflow runs formatting, Clippy, workspace tests, and `cargo-deny` on pushes and pull requests to `main`.
@@ -806,7 +806,7 @@ Before submitting a pull request, run:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo deny check --all-features
+cargo deny --all-features check
 ./scripts/wget-compare.sh
 ```
 When implementing an existing command-line option, prefer making its behavior explicit and testable. Options that are accepted but not implemented should fail clearly or emit a clear warning rather than silently implying behavior that does not occur.
@@ -822,14 +822,14 @@ Release gate for this version:
 - behavior matrix + `scripts/wget-compare.sh` green in CI
 - accepted-but-inert options warn or reject clearly (`robots=` wgetrc, `ftp_proxy`, deferred flags)
 
-Post-`0.1.2` priorities remain reliability and selective parity work (not full wget2 coverage):
+Post-`0.1.2` priorities remain reliability and selective parity work (not full wget2 coverage), roughly in this order:
 
-- proxy transport (SOCKS / FTP proxy)
-- HTTP auth challenges (Digest / NTLM)
-- FTP completion (EPSV)
+- engine module split (no behavior change) to make parity work easier
+- FTP completion (EPSV, needed for IPv6 FTP)
+- HTTP auth challenges (401 → Basic, then Digest; NTLM stays deferred)
+- proxy transport (SOCKS5, then FTP proxy)
 - TLS option hardening
-- crates.io publishing (versioned workspace deps)
-- stabilization of crate APIs
+- stabilization of crate APIs (edition 2024, `cargo-semver-checks`, automated crates.io publish) before `0.2.0`
 
 The issue tracker should be used for concrete feature requests and implementation work.
 

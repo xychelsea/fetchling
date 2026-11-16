@@ -177,10 +177,9 @@ fn absolutize_path(path: &str) -> String {
 fn daemonize(log_path: &str) -> Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
-    use std::os::fd::AsRawFd;
     use std::process;
 
-    use nix::unistd::{dup2, fork, setsid, ForkResult};
+    use nix::unistd::{dup2_stderr, dup2_stdin, dup2_stdout, fork, setsid, ForkResult};
 
     match unsafe { fork() }
         .map_err(|e| fetchling_core::Error::Io(std::io::Error::other(format!("fork: {e}"))))?
@@ -220,15 +219,13 @@ fn daemonize(log_path: &str) -> Result<()> {
             ))
         })?;
 
-    let log_fd = log.as_raw_fd();
-    let null_fd = null.as_raw_fd();
-    dup2(null_fd, 0).map_err(|e| {
+    dup2_stdin(&null).map_err(|e| {
         fetchling_core::Error::Io(std::io::Error::other(format!("dup2 stdin: {e}")))
     })?;
-    dup2(log_fd, 1).map_err(|e| {
+    dup2_stdout(&log).map_err(|e| {
         fetchling_core::Error::Io(std::io::Error::other(format!("dup2 stdout: {e}")))
     })?;
-    dup2(log_fd, 2).map_err(|e| {
+    dup2_stderr(&log).map_err(|e| {
         fetchling_core::Error::Io(std::io::Error::other(format!("dup2 stderr: {e}")))
     })?;
 

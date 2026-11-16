@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Maintenance: dependency refresh and toolchain fixes. No intentional retrieval-behavior change.
+
+### Changed
+
+- Minimum supported Rust version is now declared and enforced as **1.88**. The previous `1.75` claim was never inherited by the crates and was already unbuildable with the locked dependencies.
+- Workspace resolver `3` (MSRV-aware dependency resolution)
+- Semver-compatible lockfile refresh (tokio 1.54, rustls 0.23.46, hyper 1.12, hickory 0.26.3, and others)
+- Dependency upgrades: `webpki-roots` 1, `sha1`/`sha2`/`md-5` 0.11, `base64` 0.23, `quick-xml` 0.42, `nix` 0.31
+- `tokio-rustls` no longer enables its default `aws-lc-rs` backend; the build now compiles only the `ring` provider fetchling actually uses
+- `nix`, `posix-regex`, and `x509-parser` versions are now managed in `[workspace.dependencies]`
+- CI: `actions/checkout` v7, `softprops/action-gh-release` v3, new MSRV and rustdoc jobs, weekly scheduled run; Dependabot for Cargo and GitHub Actions
+
+### Fixed
+
+- `clippy::needless_bool` failure on Rust 1.100 that broke CI
+- Unused `hex` dependency in `fetchling-net`; redundant `homepage` manifest fields
+- README `cargo deny` invocation for current cargo-deny (`cargo deny --all-features check`)
+
 ## [0.1.2] - 2026-08-16
 
 Documentation Update: docs.rs-oriented crate documentation and broader tests. No intentional retrieval-behavior change.
@@ -69,6 +89,7 @@ First public **experimental** release. `fetchling` is not a drop-in replacement 
 - Full wget feature parity (Digest/NTLM auth, SOCKS/FTP proxies, EPSV, HTTP/2, Metalink segmentation, and other Feature status gaps)
 - Cross-platform release binaries (Linux x86_64 only for the GitHub Release artifact)
 
+[Unreleased]: https://github.com/xychelsea/fetchling/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/xychelsea/fetchling/releases/tag/v0.1.2
 [0.1.1]: https://github.com/xychelsea/fetchling/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xychelsea/fetchling/releases/tag/v0.1.0
